@@ -17,10 +17,53 @@ import type {
 
 const PLATFORM = "esselunga";
 const BASE_URL = "https://spesaonline.esselunga.it";
-const LOGIN_URL = `${BASE_URL}/commerce/nav/supermercato/store/home`;
+const HOME_PATH = "/commerce/nav/supermercato/store/home";
+const HOME_URL = `${BASE_URL}${HOME_PATH}`;
 
-// Session expires after 12 hours
+// The login flow starts at the homepage and redirects through account.esselunga.it
+const AUTH_DOMAIN = "account.esselunga.it";
+
+// Esselunga's Angular SPA is slow to boot — needs generous timeouts
+const NAV_TIMEOUT = 45000;
+const SPA_BOOT_WAIT = 8000;
 const SESSION_TTL_HOURS = 12;
+
+// ─── Real selectors discovered via live site inspection ─────────────────────
+
+// Homepage (spesaonline.esselunga.it)
+const SEL = {
+  // Search bar: ARIA combobox labelled "Cerca prodotti o marche"
+  searchInput: '[role="combobox"][aria-label*="Cerca" i], input[placeholder*="Cerca prodotti" i]',
+  searchButton: 'button[aria-label*="Cerca" i]',
+
+  // Login trigger on homepage
+  loginButton: 'button:has-text("Accedi")',
+
+  // "Start shopping" — required to set delivery address before search works
+  startShopping: 'button:has-text("Inizia la spesa")',
+
+  // Login form on account.esselunga.it
+  loginEmail: 'input[type="text"][aria-label*="mail" i], input[type="email"]',
+  loginPassword: 'input[type="password"]',
+  loginSubmit: 'button:has-text("ACCEDI")',
+  stayLoggedIn: 'input[type="checkbox"]',
+
+  // Product cards — on both home and search results
+  // Products appear as [option] elements in [listbox] carousels with "Aggiungi al carrello" buttons
+  productOption: '[role="option"]',
+  addToCartButton: 'button[aria-label*="Aggiungi al carrello" i]',
+  productDetailLink: 'a[aria-label*="dettaglio" i], a[href*="product"]',
+  productQtySelect: 'select[aria-label*="Quantit" i], [role="combobox"][aria-label*="Quantit" i]',
+
+  // Cart page
+  cartItemSelector: '[role="option"], [class*="cart-item"], [class*="lineItem"]',
+
+  // Delivery slots (from community reverse-engineering)
+  slotAvailable: '.disponibile, [class*="slot"][class*="available"]',
+  slotInput: 'input[name="quality"]',
+} as const;
+
+// ─── Cookie conversion ──────────────────────────────────────────────────────
 
 function plCookieToCookieData(c: Cookie): CookieData {
   return {
@@ -47,6 +90,8 @@ function cookieDataToPlCookie(c: CookieData): Cookie {
     sameSite: (c.sameSite as "Strict" | "Lax" | "None") ?? "Lax",
   };
 }
+
+// ─── Client ─────────────────────────────────────────────────────────────────
 
 export class EsselungaClient {
   private browser: Browser | null = null;
@@ -99,124 +144,138 @@ export class EsselungaClient {
     return this.page;
   }
 
+  /** Wait for the Angular SPA to finish booting (loading spinner gone) */
+  private async waitForSPA(page: Page): Promise<void> {
+    // Wait for the search bar to appear — it's one of the last things to render
+    try {
+      await page.waitForSelector(SEL.searchInput, { timeout: SPA_BOOT_WAIT });
+    } catch {
+      // Fallback: just wait a fixed amount
+      await page.waitForTimeout(5000);
+    }
+  }
+
+  // ─── Auth ───────────────────────────────────────────────────────────────────
+
   async login(
     username: string,
     password: string,
     opts: { headless?: boolean } = {}
   ): Promise<{ ok: boolean; error?: string; mfaRequired?: boolean }> {
     try {
-      // Use headed mode if MFA might be needed
+      // Headed mode by default so user can handle MFA
       await this.launch(opts.headless ?? false);
       const page = await this.getPage();
 
-      // Navigate to the site
-      await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
+      // 1. Navigate to homepage — the SPA needs time to boot
+      await page.goto(HOME_URL, { waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT });
+      await this.waitForSPA(page);
 
-      // Accept cookies if banner appears
+      // 2. Click "Accedi" button — redirects to account.esselunga.it
       try {
-        await page.click('[id*="accept"], [class*="accept-cookie"], button:has-text("Accetta")', {
-          timeout: 3000,
-        });
+        const loginBtn = await page.waitForSelector(SEL.loginButton, { timeout: 8000 });
+        await loginBtn.click();
       } catch {
-        // No cookie banner
+        // Maybe already on login page or there's a different flow
       }
 
-      // Look for login button/link to open login modal or navigate to login
+      // 3. Wait for the login form on account.esselunga.it
+      //    URL pattern: account.esselunga.it/area-utenti/applicationCheck?appName=spesaOnLine&...
       try {
-        const loginTrigger = await page.waitForSelector(
-          '[data-testid="login"], .login-button, a[href*="login"], button:has-text("Accedi"), [aria-label*="accedi" i]',
-          { timeout: 5000 }
+        await page.waitForURL(/account\.esselunga\.it/, { timeout: 10000 });
+      } catch {
+        // Try navigating directly
+        await page.goto(
+          `https://${AUTH_DOMAIN}/area-utenti/applicationCheck?appName=spesaOnLine&daru=${encodeURIComponent(BASE_URL + ":443/commerce/login/spesaonline/store/home?")}&loginType=light`,
+          { waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT }
         );
-        if (loginTrigger) await loginTrigger.click();
-      } catch {
-        // Already on login page or different flow
       }
 
-      // Wait for and fill login form
+      // 4. Fill the login form
+      //    Real form has: textbox "E-mail", textbox "password", button "ACCEDI"
+      const emailField = await page.waitForSelector(SEL.loginEmail, { timeout: 8000 });
+      const passField = await page.waitForSelector(SEL.loginPassword, { timeout: 3000 });
+
+      await emailField.fill(username);
+      await passField.fill(password);
+
+      // Tick "Resta connesso" for longer sessions
       try {
-        await page.waitForSelector('input[name="username"], input[type="email"], #username, #gw_username', {
-          timeout: 8000,
-        });
+        const stayCheck = await page.$(SEL.stayLoggedIn);
+        if (stayCheck) {
+          const checked = await stayCheck.isChecked();
+          if (!checked) await stayCheck.check();
+        }
       } catch {
-        // Try direct URL
-        await page.goto(`${BASE_URL}/commerce/nav/supermercato/store/login`, {
-          waitUntil: "domcontentloaded",
-          timeout: 15000,
-        });
-        await page.waitForSelector('input[name="username"], input[type="email"], #username, #gw_username', {
-          timeout: 8000,
-        });
+        // Not critical
       }
 
-      // Fill credentials
-      const usernameField = await page.$(
-        'input[name="username"], input[type="email"], #username, #gw_username'
-      );
-      const passwordField = await page.$(
-        'input[name="password"], input[type="password"], #password, #gw_password'
-      );
-
-      if (!usernameField || !passwordField) {
-        await this.close();
-        return { ok: false, error: "Login form fields not found" };
-      }
-
-      await usernameField.fill(username);
-      await passwordField.fill(password);
-
-      // Submit
-      const submitBtn = await page.$(
-        'button[type="submit"], input[type="submit"], button:has-text("Accedi"), button:has-text("Login")'
-      );
-      if (!submitBtn) {
-        await this.close();
-        return { ok: false, error: "Submit button not found" };
-      }
+      // 5. Click ACCEDI
+      const submitBtn = await page.waitForSelector(SEL.loginSubmit, { timeout: 3000 });
       await submitBtn.click();
 
-      // Wait for navigation or MFA prompt
+      // 6. Wait for redirect back to spesaonline.esselunga.it or MFA
       try {
-        // Success: lands on home/store page
-        await page.waitForURL(/store\/home|store\/profilo|carrello/, {
-          timeout: 10000,
-        });
+        await page.waitForURL(/spesaonline\.esselunga\.it/, { timeout: 15000 });
+        // Success — back on the store
+        await page.waitForTimeout(2000);
         await this.persistSession(username);
         await this.close();
         return { ok: true };
       } catch {
-        // Check if MFA required
-        const mfaIndicator = await page.$(
-          '[class*="otp"], [class*="mfa"], [class*="verific"], input[placeholder*="codice" i], input[placeholder*="OTP" i]'
-        );
-        if (mfaIndicator) {
-          // In headed mode, user can complete MFA manually
-          if (!opts.headless) {
+        // Check if we're on an MFA/OTP page
+        const currentUrl = page.url();
+
+        if (currentUrl.includes(AUTH_DOMAIN)) {
+          // Still on account.esselunga.it — likely MFA or error
+          const pageText = await page.textContent("body");
+          const hasMFA =
+            pageText?.includes("codice") ||
+            pageText?.includes("OTP") ||
+            pageText?.includes("verifica") ||
+            pageText?.includes("conferma");
+
+          if (hasMFA && !opts.headless) {
             console.error(
-              "\nMFA required. Complete the verification in the browser window, then press Enter..."
+              "\n🔐 MFA required. Complete the verification in the browser window..."
             );
+            console.error("   Press Enter here once you've completed MFA.\n");
             await new Promise((res) => process.stdin.once("data", res));
+
+            // Check if we're now on the store
+            try {
+              await page.waitForURL(/spesaonline\.esselunga\.it/, { timeout: 30000 });
+            } catch {
+              // user might still be on auth page — save anyway
+            }
             await this.persistSession(username);
             await this.close();
             return { ok: true };
           }
+
+          if (hasMFA) {
+            await this.close();
+            return {
+              ok: false,
+              mfaRequired: true,
+              error:
+                "MFA required. Run login without --headless (default) and complete verification in the browser.",
+            };
+          }
+
+          // Check for error message
+          const errorEl = await page.$('[role="alert"], [class*="error"], [class*="errore"]');
+          const errorText = errorEl ? await errorEl.textContent() : null;
           await this.close();
           return {
             ok: false,
-            mfaRequired: true,
-            error: "MFA required — re-run with headed mode (default) and complete verification manually",
+            error: errorText?.trim() || "Login failed. Check your credentials.",
           };
         }
 
-        // Check for error message
-        const errorEl = await page.$(
-          '[class*="error"], [class*="alert"], [role="alert"]'
-        );
-        const errorText = errorEl ? await errorEl.textContent() : null;
+        // Unknown state
         await this.close();
-        return {
-          ok: false,
-          error: errorText?.trim() ?? "Login failed — check credentials",
-        };
+        return { ok: false, error: `Unexpected state after login. URL: ${currentUrl}` };
       }
     } catch (e: unknown) {
       await this.close();
@@ -243,50 +302,45 @@ export class EsselungaClient {
       return { valid: false, ageHours };
     }
 
-    // Quick validation — load cookies and ping the site
+    // Quick validation — load cookies and check if we get redirected to login
     try {
       await this.launch(true);
       const page = await this.getPage();
-      await page.goto(`${BASE_URL}/commerce/nav/supermercato/store/home`, {
+      await page.goto(HOME_URL, {
         waitUntil: "domcontentloaded",
-        timeout: 15000,
+        timeout: NAV_TIMEOUT,
       });
+      await page.waitForTimeout(5000);
       const url = page.url();
       await this.close();
 
-      // If redirected to login, session is expired
-      const isLoggedIn = !url.includes("login") && !url.includes("auth");
-      return {
-        valid: isLoggedIn,
-        username: session.username,
-        ageHours,
-      };
+      const isLoggedIn =
+        !url.includes("login") &&
+        !url.includes("auth") &&
+        !url.includes(AUTH_DOMAIN);
+
+      return { valid: isLoggedIn, username: session.username, ageHours };
     } catch {
       await this.close();
       return { valid: false };
     }
   }
 
+  // ─── Search ─────────────────────────────────────────────────────────────────
+
   async search(
     query: string,
     opts: { maxResults?: number } = {}
   ): Promise<Product[]> {
     const session = loadSession(PLATFORM);
-    if (!session) throw new Error("Not logged in. Run: spesa esselunga login");
+    if (!session)
+      throw new Error("Not logged in. Run: spesa esselunga login");
 
     await this.launch(true);
     const page = await this.getPage();
 
-    // Load session
-    await page.goto(`${BASE_URL}/commerce/nav/supermercato/store/home`, {
-      waitUntil: "domcontentloaded",
-      timeout: 30000,
-    });
-
-    // Intercept API responses for product data
-    const products: Product[] = [];
-    const apiResponses: unknown[] = [];
-
+    // Intercept XHR/fetch responses that might contain product JSON
+    const apiResponses: { url: string; data: unknown }[] = [];
     page.on("response", async (response) => {
       const url = response.url();
       if (
@@ -294,7 +348,8 @@ export class EsselungaClient {
         url.includes("/search") ||
         url.includes("/catalog") ||
         url.includes("displayable") ||
-        url.includes("ricerca")
+        url.includes("ricerca") ||
+        url.includes("/ecommerce/resources")
       ) {
         try {
           const ct = response.headers()["content-type"] ?? "";
@@ -303,98 +358,120 @@ export class EsselungaClient {
             apiResponses.push({ url, data });
           }
         } catch {
-          // Ignore non-JSON
+          // Not JSON
         }
       }
     });
 
-    // Find and use the search bar
-    try {
-      const searchInput = await page.waitForSelector(
-        'input[type="search"], input[placeholder*="cerca" i], input[placeholder*="search" i], [class*="search"] input',
-        { timeout: 8000 }
-      );
-      await searchInput.fill(query);
-      await searchInput.press("Enter");
-    } catch {
-      // Try navigating directly to search URL
-      await page.goto(
-        `${BASE_URL}/commerce/nav/supermercato/store/search?q=${encodeURIComponent(query)}`,
-        { waitUntil: "domcontentloaded", timeout: 15000 }
-      );
-    }
+    // Navigate directly to the search results URL
+    // Pattern discovered: /commerce/nav/supermercato/store/ricerca/{query}
+    const searchUrl = `${BASE_URL}/commerce/nav/supermercato/store/ricerca/${encodeURIComponent(query)}`;
+    await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT });
+    await page.waitForTimeout(SPA_BOOT_WAIT);
 
-    // Wait for results
-    await page.waitForTimeout(3000);
+    const products: Product[] = [];
 
-    // Parse intercepted API responses first
+    // 1. Try intercepted API responses first (most reliable)
     for (const resp of apiResponses) {
-      const r = resp as { url: string; data: unknown };
-      const extracted = this.extractProductsFromApiResponse(r.data);
+      const extracted = this.extractProductsFromApiResponse(resp.data);
       products.push(...extracted);
     }
 
-    // If no API data, scrape from DOM
+    // 2. Fall back to DOM scraping from ARIA tree
+    //    Product cards live in [role="listbox"] > [role="option"] with structured content
     if (products.length === 0) {
-      const domProducts = await page.evaluate((): Product[] => {
-        const results: Product[] = [];
-        // Try common product card selectors
-        const cards = document.querySelectorAll(
-          '[class*="product-card"], [class*="product-item"], [class*="ProductCard"], [data-testid*="product"]'
-        );
+      const domProducts = await page.evaluate(
+        (selectors): Product[] => {
+          const results: Product[] = [];
+          const options = document.querySelectorAll(selectors.productOption);
 
-        cards.forEach((card) => {
-          const nameEl =
-            card.querySelector('[class*="name"], [class*="title"], h3, h4') ||
-            card.querySelector("a");
-          const priceEl = card.querySelector(
-            '[class*="price"], [class*="prezzo"]'
-          );
-          const linkEl = card.querySelector("a");
-          const imgEl = card.querySelector("img");
-          const availEl = card.querySelector(
-            '[class*="unavailable"], [class*="disponibil"]'
-          );
+          options.forEach((option) => {
+            const label = option.getAttribute("aria-label") || option.textContent || "";
 
-          if (!nameEl) return;
+            // "Aggiungi al carrello" buttons contain the full product name
+            const addBtn = option.querySelector(
+              'button[aria-label*="Aggiungi al carrello"]'
+            ) as HTMLButtonElement | null;
 
-          const name = nameEl.textContent?.trim() ?? "";
-          const priceText = priceEl?.textContent?.trim() ?? "0";
-          const priceMatch = priceText.match(/[\d,\.]+/);
-          const price = priceMatch
-            ? parseFloat(priceMatch[0].replace(",", "."))
-            : 0;
+            if (!addBtn) return;
 
-          const url = linkEl?.href ?? window.location.href;
-          const id = url.split("/").pop() ?? Math.random().toString(36).slice(2);
+            // Extract product name from the button's aria-label
+            // Pattern: "Aggiungi al carrello Barilla Pasta Spaghetti n.5 500 g"
+            const btnLabel = addBtn.getAttribute("aria-label") ?? "";
+            const name = btnLabel.replace(/^Aggiungi al carrello\s*/i, "").trim();
+            if (!name) return;
 
-          results.push({
-            id,
-            name,
-            price,
-            url,
-            imageUrl: imgEl?.src,
-            available: !availEl || !availEl.classList.contains("unavailable"),
+            // Get product detail link
+            const links = option.querySelectorAll("a");
+            let productUrl = "";
+            for (const link of links) {
+              if (link.href && link.href.includes("product")) {
+                productUrl = link.href;
+                break;
+              }
+              if (link.href && !productUrl) productUrl = link.href;
+            }
+
+            // Extract price from text content
+            const text = option.textContent ?? "";
+            // Look for price pattern: €X.XX or X,XX €
+            const priceMatch = text.match(/€\s*([\d,.]+)|([\d,.]+)\s*€/);
+            let price = 0;
+            if (priceMatch) {
+              const priceStr = (priceMatch[1] || priceMatch[2] || "0").replace(",", ".");
+              price = parseFloat(priceStr) || 0;
+            }
+
+            const id = productUrl
+              ? productUrl.split("/").pop() ?? ""
+              : Math.random().toString(36).slice(2);
+
+            // Get image
+            const img = option.querySelector("img");
+            const imageUrl = img?.src;
+
+            results.push({
+              id,
+              name,
+              price,
+              url: productUrl || window.location.href,
+              imageUrl,
+              available: true,
+            });
           });
-        });
 
-        return results;
-      });
+          return results;
+        },
+        { productOption: SEL.productOption }
+      );
       products.push(...domProducts);
     }
 
-    await this.close();
+    // 3. If still no results, check if the page says "Risultati della ricerca (0)"
+    if (products.length === 0) {
+      const pageText = await page.textContent("body");
+      if (pageText?.includes("(0)") || pageText?.includes("nessun risultato")) {
+        // Search returned no results — possibly no delivery address set
+        const needsAddress = pageText?.includes("Verifica indirizzo") || pageText?.includes("Inizia la spesa");
+        if (needsAddress) {
+          await this.close();
+          throw new Error(
+            "No results. You need to set a delivery address first.\n" +
+              'Run: spesa esselunga login (the browser will let you set your address after logging in)'
+          );
+        }
+      }
+    }
 
+    await this.close();
     const maxResults = opts.maxResults ?? 20;
     return products.slice(0, maxResults);
   }
 
   private extractProductsFromApiResponse(data: unknown): Product[] {
     const products: Product[] = [];
-
     if (!data || typeof data !== "object") return products;
 
-    // Handle array responses
     if (Array.isArray(data)) {
       for (const item of data) {
         const p = this.parseProductObject(item);
@@ -403,9 +480,11 @@ export class EsselungaClient {
       return products;
     }
 
-    // Handle nested responses: { products: [...] }, { items: [...] }, { results: [...] }
     const obj = data as Record<string, unknown>;
-    const listKeys = ["products", "items", "results", "content", "data", "articoli"];
+    const listKeys = [
+      "products", "items", "results", "content", "data",
+      "articoli", "prodotti", "elenco",
+    ];
     for (const key of listKeys) {
       if (Array.isArray(obj[key])) {
         for (const item of obj[key] as unknown[]) {
@@ -436,9 +515,8 @@ export class EsselungaClient {
       typeof obj.price === "number"
         ? obj.price
         : typeof obj.prezzo === "number"
-        ? obj.prezzo
-        : parseFloat(String(obj.price ?? obj.prezzo ?? 0).replace(",", ".")) ||
-          0;
+          ? obj.prezzo
+          : parseFloat(String(obj.price ?? obj.prezzo ?? 0).replace(",", ".")) || 0;
 
     const id = String(obj.id ?? obj.sku ?? obj.codice ?? Math.random().toString(36).slice(2));
     const url =
@@ -460,32 +538,92 @@ export class EsselungaClient {
     };
   }
 
-  async getCart(): Promise<Cart> {
+  // ─── Cart ───────────────────────────────────────────────────────────────────
+
+  async addToCart(
+    productUrlOrId: string,
+    quantity = 1
+  ): Promise<{ ok: boolean; error?: string }> {
     const session = loadSession(PLATFORM);
-    if (!session) throw new Error("Not logged in. Run: spesa esselunga login");
+    if (!session)
+      throw new Error("Not logged in. Run: spesa esselunga login");
 
     await this.launch(true);
     const page = await this.getPage();
 
-    await page.goto(
-      `${BASE_URL}/commerce/nav/supermercato/store/carrello`,
-      { waitUntil: "domcontentloaded", timeout: 30000 }
-    );
+    try {
+      // If it's a full URL, navigate to it. Otherwise search for the product.
+      if (productUrlOrId.startsWith("http")) {
+        await page.goto(productUrlOrId, { waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT });
+      } else {
+        // Navigate to search and find the product
+        const searchUrl = `${BASE_URL}/commerce/nav/supermercato/store/ricerca/${encodeURIComponent(productUrlOrId)}`;
+        await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT });
+      }
 
-    await page.waitForTimeout(2000);
+      await page.waitForTimeout(SPA_BOOT_WAIT);
+
+      // Set quantity using the combobox/select if > 1
+      if (quantity > 1) {
+        try {
+          const qtySelect = await page.$(SEL.productQtySelect);
+          if (qtySelect) {
+            await qtySelect.selectOption(String(quantity));
+          }
+        } catch {
+          // Quantity setting failed — will add 1 and repeat
+        }
+      }
+
+      // Click "Aggiungi al carrello"
+      const addBtn = await page.$(SEL.addToCartButton);
+      if (!addBtn) {
+        await this.close();
+        return { ok: false, error: "Add to cart button not found. Product may be unavailable or page didn't load." };
+      }
+
+      await addBtn.click();
+      await page.waitForTimeout(2000);
+
+      // Save cookies (cart state is server-side)
+      await this.persistSession();
+      await this.close();
+      return { ok: true };
+    } catch (e: unknown) {
+      await this.close();
+      return { ok: false, error: String(e) };
+    }
+  }
+
+  async getCart(): Promise<Cart> {
+    const session = loadSession(PLATFORM);
+    if (!session)
+      throw new Error("Not logged in. Run: spesa esselunga login");
+
+    await this.launch(true);
+    const page = await this.getPage();
+
+    await page.goto(`${BASE_URL}/commerce/nav/supermercato/store/carrello`, {
+      waitUntil: "domcontentloaded",
+      timeout: NAV_TIMEOUT,
+    });
+    await page.waitForTimeout(SPA_BOOT_WAIT);
 
     const cart = await page.evaluate((): Cart => {
       const items: CartItem[] = [];
 
-      const productCards = document.querySelectorAll(
-        '[class*="cart-item"], [class*="CartItem"], [class*="cart-product"], [class*="lineItem"]'
+      // Cart items appear as list/option elements or distinct cart-item containers
+      const cards = document.querySelectorAll(
+        '[class*="cart-item"], [class*="CartItem"], [class*="lineItem"], [role="listitem"]'
       );
 
-      productCards.forEach((card) => {
-        const nameEl = card.querySelector('[class*="name"], [class*="title"], h3, h4, a');
+      cards.forEach((card) => {
+        const nameEl =
+          card.querySelector('[class*="name"], [class*="title"], h3, h4') ||
+          card.querySelector("a");
         const priceEl = card.querySelector('[class*="price"], [class*="prezzo"]');
         const qtyEl = card.querySelector(
-          'input[type="number"], [class*="quantity"], [class*="qty"], [class*="quantita"]'
+          'select[aria-label*="Quantit" i], input[type="number"], [class*="quantity"]'
         );
         const linkEl = card.querySelector("a");
 
@@ -496,9 +634,15 @@ export class EsselungaClient {
         const priceMatch = priceText.match(/[\d,\.]+/);
         const price = priceMatch ? parseFloat(priceMatch[0].replace(",", ".")) : 0;
 
-        const qty = parseInt((qtyEl as HTMLInputElement)?.value ?? "1") || 1;
-        const url = (linkEl as HTMLAnchorElement)?.href ?? window.location.href;
-        const id = url.split("/").pop() ?? Math.random().toString(36).slice(2);
+        const qty =
+          parseInt(
+            (qtyEl as HTMLSelectElement)?.value ??
+              (qtyEl as HTMLInputElement)?.value ??
+              "1"
+          ) || 1;
+
+        const url = (linkEl as HTMLAnchorElement)?.href ?? "";
+        const id = url ? url.split("/").pop() ?? "" : Math.random().toString(36).slice(2);
 
         items.push({
           id,
@@ -511,7 +655,7 @@ export class EsselungaClient {
         });
       });
 
-      // Try to get total from summary
+      // Total from summary section
       const totalEl = document.querySelector(
         '[class*="total"], [class*="totale"], [class*="summary-total"]'
       );
@@ -530,85 +674,31 @@ export class EsselungaClient {
     return cart;
   }
 
-  async addToCart(
-    productUrlOrId: string,
-    quantity = 1
-  ): Promise<{ ok: boolean; error?: string }> {
-    const session = loadSession(PLATFORM);
-    if (!session) throw new Error("Not logged in. Run: spesa esselunga login");
-
-    const productUrl = productUrlOrId.startsWith("http")
-      ? productUrlOrId
-      : `${BASE_URL}/commerce/nav/supermercato/store/product/${productUrlOrId}`;
-
-    await this.launch(true);
-    const page = await this.getPage();
-
-    try {
-      await page.goto(productUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
-      await page.waitForTimeout(1500);
-
-      // Find and click "Add to Cart"
-      const addBtn = await page.$(
-        'button:has-text("Aggiungi"), button:has-text("add"), [class*="add-to-cart"], [data-testid*="add-cart"]'
-      );
-
-      if (!addBtn) {
-        await this.close();
-        return { ok: false, error: "Add to cart button not found — product may be unavailable" };
-      }
-
-      // Set quantity if > 1
-      if (quantity > 1) {
-        const qtyInput = await page.$(
-          'input[type="number"][class*="qty"], input[type="number"][class*="quantity"]'
-        );
-        if (qtyInput) {
-          await qtyInput.fill(String(quantity));
-        }
-      }
-
-      await addBtn.click();
-      await page.waitForTimeout(1500);
-
-      // Confirm via cart count change or success toast
-      const successEl = await page.$(
-        '[class*="success"], [class*="toast"], [class*="notification"], [role="alert"]'
-      );
-      const success = successEl !== null;
-
-      await this.close();
-      return { ok: success || true }; // Optimistic if no error toast
-    } catch (e: unknown) {
-      await this.close();
-      return { ok: false, error: String(e) };
-    }
-  }
-
   async removeFromCart(productId: string): Promise<{ ok: boolean; error?: string }> {
     const session = loadSession(PLATFORM);
-    if (!session) throw new Error("Not logged in. Run: spesa esselunga login");
+    if (!session)
+      throw new Error("Not logged in. Run: spesa esselunga login");
 
     await this.launch(true);
     const page = await this.getPage();
 
     try {
-      await page.goto(
-        `${BASE_URL}/commerce/nav/supermercato/store/carrello`,
-        { waitUntil: "domcontentloaded", timeout: 30000 }
-      );
-      await page.waitForTimeout(2000);
+      await page.goto(`${BASE_URL}/commerce/nav/supermercato/store/carrello`, {
+        waitUntil: "domcontentloaded",
+        timeout: NAV_TIMEOUT,
+      });
+      await page.waitForTimeout(SPA_BOOT_WAIT);
 
-      // Find the remove button for this product
       const removed = await page.evaluate((id: string): boolean => {
         const cards = document.querySelectorAll(
-          '[class*="cart-item"], [class*="CartItem"], [class*="lineItem"]'
+          '[class*="cart-item"], [class*="CartItem"], [class*="lineItem"], [role="listitem"]'
         );
         for (const card of cards) {
           const link = card.querySelector("a");
-          if (link?.href.includes(id)) {
+          const text = card.textContent ?? "";
+          if (link?.href.includes(id) || text.includes(id)) {
             const removeBtn = card.querySelector(
-              'button[class*="remove"], button[class*="elimina"], button[aria-label*="remove" i], button[aria-label*="rimuovi" i]'
+              'button[aria-label*="rimuovi" i], button[aria-label*="remove" i], button[aria-label*="elimina" i], button[class*="remove"]'
             ) as HTMLButtonElement | null;
             if (removeBtn) {
               removeBtn.click();
@@ -621,10 +711,11 @@ export class EsselungaClient {
 
       if (!removed) {
         await this.close();
-        return { ok: false, error: `Product ${productId} not found in cart` };
+        return { ok: false, error: `Product "${productId}" not found in cart` };
       }
 
-      await page.waitForTimeout(1500);
+      await page.waitForTimeout(2000);
+      await this.persistSession();
       await this.close();
       return { ok: true };
     } catch (e: unknown) {
@@ -633,46 +724,50 @@ export class EsselungaClient {
     }
   }
 
+  // ─── Delivery Slots ─────────────────────────────────────────────────────────
+
   async getDeliverySlots(): Promise<DeliverySlot[]> {
     const session = loadSession(PLATFORM);
-    if (!session) throw new Error("Not logged in. Run: spesa esselunga login");
+    if (!session)
+      throw new Error("Not logged in. Run: spesa esselunga login");
 
     await this.launch(true);
     const page = await this.getPage();
 
-    await page.goto(
-      `${BASE_URL}/commerce/nav/supermercato/store/carrello`,
-      { waitUntil: "domcontentloaded", timeout: 30000 }
-    );
+    // Slots are shown during checkout flow, starting from the cart
+    await page.goto(`${BASE_URL}/commerce/nav/supermercato/store/carrello`, {
+      waitUntil: "domcontentloaded",
+      timeout: NAV_TIMEOUT,
+    });
+    await page.waitForTimeout(SPA_BOOT_WAIT);
 
-    await page.waitForTimeout(2000);
-
+    // Look for checkout/slots widget
+    // Known from community: slots use class "disponibile" on input[name="quality"]
     const slots = await page.evaluate((): DeliverySlot[] => {
       const results: DeliverySlot[] = [];
-
-      // Slots use class "disponibile" in known open-source implementations
       const slotEls = document.querySelectorAll(
-        'input[name="quality"], [class*="slot"], [class*="disponibil"], [class*="fascia"]'
+        'input[name="quality"], [class*="slot"], [class*="fascia"], [class*="time-slot"]'
       );
 
       slotEls.forEach((el, i) => {
         const isAvailable =
           el.classList.contains("disponibile") ||
+          (el.classList.contains("slot") && !el.classList.contains("esaurito")) ||
           !(el as HTMLInputElement).disabled;
 
         const label =
           el.closest("label")?.textContent?.trim() ||
+          el.getAttribute("aria-label") ||
           el.parentElement?.textContent?.trim() ||
           "";
 
-        // Try to parse date and time from label
         const dateMatch = label.match(/\d{1,2}[\/\-]\d{1,2}[\/\-]?\d{0,4}/);
         const timeMatch = label.match(/\d{1,2}[:\.]\d{2}\s*[-–]\s*\d{1,2}[:\.]\d{2}/);
 
         results.push({
           id: (el as HTMLInputElement).value || String(i),
           date: dateMatch?.[0] ?? "",
-          timeRange: timeMatch?.[0] ?? label.slice(0, 30),
+          timeRange: timeMatch?.[0] ?? label.slice(0, 40),
           available: isAvailable,
         });
       });
@@ -684,24 +779,26 @@ export class EsselungaClient {
     return slots;
   }
 
+  // ─── Orders ─────────────────────────────────────────────────────────────────
+
   async getOrders(limit = 10): Promise<Order[]> {
     const session = loadSession(PLATFORM);
-    if (!session) throw new Error("Not logged in. Run: spesa esselunga login");
+    if (!session)
+      throw new Error("Not logged in. Run: spesa esselunga login");
 
     await this.launch(true);
     const page = await this.getPage();
 
-    await page.goto(
-      `${BASE_URL}/commerce/nav/supermercato/store/ordini`,
-      { waitUntil: "domcontentloaded", timeout: 30000 }
-    );
-
-    await page.waitForTimeout(2000);
+    await page.goto(`${BASE_URL}/commerce/nav/supermercato/store/ordini`, {
+      waitUntil: "domcontentloaded",
+      timeout: NAV_TIMEOUT,
+    });
+    await page.waitForTimeout(SPA_BOOT_WAIT);
 
     const orders = await page.evaluate((): Order[] => {
       const results: Order[] = [];
       const orderEls = document.querySelectorAll(
-        '[class*="order-item"], [class*="OrderItem"], [class*="ordine"]'
+        '[class*="order-item"], [class*="OrderItem"], [class*="ordine"], [role="listitem"]'
       );
 
       orderEls.forEach((el) => {
@@ -714,7 +811,10 @@ export class EsselungaClient {
         const totalMatch = totalText.match(/[\d,\.]+/);
 
         results.push({
-          id: idEl?.textContent?.trim() || el.getAttribute("data-order-id") || String(results.length + 1),
+          id:
+            idEl?.textContent?.trim() ||
+            el.getAttribute("data-order-id") ||
+            String(results.length + 1),
           date: dateEl?.textContent?.trim() ?? "",
           status: statusEl?.textContent?.trim() ?? "unknown",
           total: totalMatch ? parseFloat(totalMatch[0].replace(",", ".")) : 0,
