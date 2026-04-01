@@ -10,10 +10,9 @@ CLI for ordering groceries online in Italy. Currently supports Esselunga (Step 1
 ## Setup (one-time)
 
 ```bash
-# Install dependencies and build
 cd /path/to/spesa
 bun install
-bunx playwright install chromium
+bunx playwright install webkit
 bun run build
 # Binary is now at ./dist/spesa — add to PATH or use full path
 ```
@@ -51,12 +50,12 @@ JSON output format:
   "ok": true,
   "data": [
     {
-      "id": "12345",
-      "name": "Latte Intero Esselunga 1L",
-      "brand": "Esselunga",
-      "price": 1.29,
-      "pricePerUnit": "1.29/L",
-      "url": "https://spesaonline.esselunga.it/...product/12345",
+      "id": "302042",
+      "name": "Arborea Latte Parzialmente Scremato UHT 1000 ml",
+      "price": 1.65,
+      "pricePerUnit": "1,65 €/l",
+      "url": "https://spesaonline.esselunga.it/.../prodotto/302042/...",
+      "imageUrl": "https://images.services.esselunga.it/...",
       "available": true
     }
   ]
@@ -66,16 +65,16 @@ JSON output format:
 ## Managing the Cart
 
 ```bash
-# Add by product URL or ID
-spesa esselunga cart add https://spesaonline.esselunga.it/.../product/12345
-spesa esselunga cart add 12345 --qty 3
+# Add by product URL or search query
+spesa esselunga cart add https://spesaonline.esselunga.it/.../prodotto/12345/...
+spesa esselunga cart add "spaghetti barilla" --qty 1
 
 # View cart
 spesa esselunga cart list
 spesa esselunga cart list --json
 
-# Remove item
-spesa esselunga cart remove 12345
+# Remove item by SKU
+spesa esselunga cart remove 3823554797
 ```
 
 Cart JSON format:
@@ -84,10 +83,18 @@ Cart JSON format:
   "ok": true,
   "data": {
     "items": [
-      { "id": "12345", "name": "Latte Intero 1L", "price": 1.29, "quantity": 2, "subtotal": 2.58 }
+      {
+        "id": "3823554797",
+        "name": "Barilla Pasta Spaghetti n.5 500g",
+        "price": 0.79,
+        "quantity": 1,
+        "subtotal": 0.79,
+        "imageUrl": "https://images.services.esselunga.it/...",
+        "pricePerUnit": "1,58 €/kg"
+      }
     ],
-    "total": 2.58,
-    "itemCount": 2
+    "total": 0.79,
+    "itemCount": 1
   }
 }
 ```
@@ -98,6 +105,8 @@ Cart JSON format:
 spesa esselunga slots
 spesa esselunga slots --json
 ```
+
+Returns available delivery windows for the next 7 days. Requires items in cart.
 
 ## Orders
 
@@ -130,13 +139,16 @@ spesa esselunga slots --json
 All commands exit with code 1 on failure. JSON mode always returns `{ "ok": false, "error": "..." }` on failure.
 
 Common errors:
-- `Not logged in` → run `spesa esselunga login`
-- `Session expired` → re-run `spesa esselunga login`
-- `MFA required` → run login without `--headless` (default) and complete in browser
+- `Not logged in` — run `spesa esselunga login`
+- `Session expired` — re-run `spesa esselunga login`
+- `MFA required` — run login without `--headless` (default) and complete in browser
+- `Cannot reach spesaonline.esselunga.it` — use a VPN with an Italian IP
+- `Cart is empty` — add items before checking delivery slots
 
 ## Architecture Notes
 
-- Uses Playwright (headless Chromium) to drive the Esselunga Angular SPA
+- Uses Playwright with WebKit (Safari engine) to drive the Esselunga AngularJS SPA
+- WebKit is required because Esselunga's WAF blocks Chromium-based browsers
 - Intercepts XHR/fetch responses to capture product API data when available
 - Falls back to DOM scraping for product cards and cart items
 - Sessions stored as cookies in `~/.spesa/sessions/`
