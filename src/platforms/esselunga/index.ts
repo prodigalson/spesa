@@ -772,41 +772,90 @@ export class EsselungaClient {
     await this.launch(true);
     const page = await this.getPage();
 
-    // Slots are shown during checkout flow, starting from the trolley
+    // Slots are accessed from the trolley page by clicking "Data e ora" / "PRENOTA"
+    // which triggers ng-click="$ctrl.onDeliveryClick()" and opens a slot picker dialog.
+    // This requires items in the cart.
     await page.goto(`${BASE_URL}/commerce/nav/supermercato/checkout/trolley`, {
       waitUntil: "networkidle",
       timeout: NAV_TIMEOUT,
     });
     await page.waitForTimeout(SPA_BOOT_WAIT);
 
-    // Look for checkout/slots widget
-    // Known from community: slots use class "disponibile" on input[name="quality"]
+    // Check if cart is empty — slots won't be available
+    const hasItems = await page.$("div.esselunga-checkout-trolley-container[ng-repeat]");
+    if (!hasItems) {
+      await this.close();
+      throw new Error(
+        "Cart is empty. Add items before checking delivery slots.\n" +
+        "Run: spesa esselunga cart add <product-url-or-query>"
+      );
+    }
+
+    // Click the "Data e ora" / "PRENOTA" button to open the slot picker
+    try {
+      const deliveryBtn = await page.$('button[ng-click*="onDeliveryClick"]');
+      if (deliveryBtn) {
+        await deliveryBtn.click();
+        // Wait for the slot picker dialog/panel to load
+        await page.waitForTimeout(5000);
+      }
+    } catch {
+      // Button might not exist or might fail
+    }
+
+    // Scrape slots from the grid that appears after clicking "Data e ora"
+    // The grid has:
+    //   - Days: div.esselunga-slots-grid-time-slot[ng-repeat="day in slotCtrl.displayableDays"]
+    //   - Rows: div.esselunga-slots-grid-slots[ng-repeat="range in slotCtrl.timeRanges"]
+    //   - Cells: button.slot-button inside each row, one per day
+    //     - class "disponibile" = available, "esaurita" = sold out, "prenotata" = booked
+    //     - aria-label has full description: "Fascia oraria dalle HH:MM alle HH:MM di {day} {date} ..."
     const slots = await page.evaluate((): DeliverySlot[] => {
       const results: DeliverySlot[] = [];
-      const slotEls = document.querySelectorAll(
-        'input[name="quality"], [class*="slot"], [class*="fascia"], [class*="time-slot"]'
-      );
 
-      slotEls.forEach((el, i) => {
-        const isAvailable =
-          el.classList.contains("disponibile") ||
-          (el.classList.contains("slot") && !el.classList.contains("esaurito")) ||
-          !(el as HTMLInputElement).disabled;
+      // Find the visible slot grid (el-show)
+      const grid = document.querySelector("div.esselunga-slots.el-show .esselunga-slots-grid");
+      if (!grid) return results;
 
-        const label =
-          el.closest("label")?.textContent?.trim() ||
-          el.getAttribute("aria-label") ||
-          el.parentElement?.textContent?.trim() ||
-          "";
+      // Get day headers: "G02", "V03", "S04" etc.
+      const dayHeaders = [...grid.querySelectorAll(".esselunga-slots-grid-time-slot[ng-repeat]")]
+        .map(el => el.textContent?.trim() ?? "");
 
-        const dateMatch = label.match(/\d{1,2}[\/\-]\d{1,2}[\/\-]?\d{0,4}/);
-        const timeMatch = label.match(/\d{1,2}[:\.]\d{2}\s*[-–]\s*\d{1,2}[:\.]\d{2}/);
+      // Iterate over each time-range row
+      const rows = grid.querySelectorAll(".esselunga-slots-grid-slots[ng-repeat]");
 
-        results.push({
-          id: (el as HTMLInputElement).value || String(i),
-          date: dateMatch?.[0] ?? "",
-          timeRange: timeMatch?.[0] ?? label.slice(0, 40),
-          available: isAvailable,
+      rows.forEach((row) => {
+        // Time range from the date cell: "07:00\n08:00"
+        const timeEl = row.querySelector(".esselunga-slots-grid-slots-item-date");
+        const timeText = timeEl?.textContent?.trim() ?? "";
+        // Parse "07:0008:00" or "07:00\n08:00" into "07:00-08:00"
+        const timeParts = timeText.match(/(\d{1,2}:\d{2})/g);
+        const timeRange = timeParts && timeParts.length >= 2 ? `${timeParts[0]}-${timeParts[1]}` : timeText;
+
+        // Each slot button corresponds to a day column
+        const buttons = row.querySelectorAll("button.slot-button");
+        buttons.forEach((btn, dayIdx) => {
+          const ariaLabel = btn.getAttribute("aria-label") ?? "";
+
+          // Parse day info from aria-label for full name, or fall back to header
+          const dayMatch = ariaLabel.match(/(lunedì|martedì|mercoledì|giovedì|venerdì|sabato|domenica)\s+(\d{1,2})/i);
+          const date = dayMatch
+            ? `${dayMatch[1]} ${dayMatch[2]}`
+            : (dayHeaders[dayIdx] ?? "");
+
+          // Availability from CSS class (most reliable)
+          const isAvailable = btn.classList.contains("disponibile");
+          const isUnavailable =
+            btn.classList.contains("esaurita") ||
+            ariaLabel.toLowerCase().includes("non più disponibile") ||
+            ariaLabel.toLowerCase().includes("non disponibile");
+
+          results.push({
+            id: `${dayIdx}-${timeRange}`,
+            date,
+            timeRange,
+            available: isAvailable && !isUnavailable,
+          });
         });
       });
 
@@ -827,36 +876,57 @@ export class EsselungaClient {
     await this.launch(true);
     const page = await this.getPage();
 
-    await page.goto(`${BASE_URL}/commerce/nav/supermercato/store/ordini`, {
-      waitUntil: "domcontentloaded",
+    // Real orders URL: /ordini/precedenti ("I tuoi ordini")
+    await page.goto(`${BASE_URL}/commerce/nav/supermercato/ordini/precedenti`, {
+      waitUntil: "commit",
       timeout: NAV_TIMEOUT,
     });
     await page.waitForTimeout(SPA_BOOT_WAIT);
 
     const orders = await page.evaluate((): Order[] => {
       const results: Order[] = [];
+
+      // Check for "Non è presente nessun ordine" (no orders)
+      const bodyText = document.body.textContent ?? "";
+      if (bodyText.includes("Non è presente nessun ordine") || bodyText.includes("nessun ordine")) {
+        return results;
+      }
+
+      // Orders may use ng-repeat with order items
+      // Try multiple selector patterns for order rows
       const orderEls = document.querySelectorAll(
-        '[class*="order-item"], [class*="OrderItem"], [class*="ordine"], [role="listitem"]'
+        '[ng-repeat*="order"], [ng-repeat*="ordin"], [ng-repeat*="spesa"], ' +
+        '[class*="order-item"], [class*="ordine-item"], [class*="ordine-riga"], ' +
+        'tr[class*="ordine"], div[class*="ordine"]'
       );
 
       orderEls.forEach((el) => {
-        const idEl = el.querySelector('[class*="order-id"], [class*="numero"]');
-        const dateEl = el.querySelector('[class*="date"], [class*="data"]');
-        const statusEl = el.querySelector('[class*="status"], [class*="stato"]');
-        const totalEl = el.querySelector('[class*="total"], [class*="totale"]');
+        const text = el.textContent?.trim() ?? "";
+        if (!text || text.length > 500) return;
 
-        const totalText = totalEl?.textContent?.trim() ?? "0";
-        const totalMatch = totalText.match(/[\d,\.]+/);
+        // Extract order ID (long numeric)
+        const idMatch = text.match(/(?:ordine|order|#)\s*[:\s]*(\d{6,})/i) ||
+                         text.match(/(\d{8,})/);
 
-        results.push({
-          id:
-            idEl?.textContent?.trim() ||
-            el.getAttribute("data-order-id") ||
-            String(results.length + 1),
-          date: dateEl?.textContent?.trim() ?? "",
-          status: statusEl?.textContent?.trim() ?? "unknown",
-          total: totalMatch ? parseFloat(totalMatch[0].replace(",", ".")) : 0,
-        });
+        // Extract date (DD/MM/YYYY)
+        const dateMatch = text.match(/(\d{1,2}\/\d{1,2}\/\d{2,4})/);
+
+        // Extract total price
+        const totalMatch = text.match(/(?:totale|total)\s*[:\s]*([\d,\.]+)\s*€/i) ||
+                           text.match(/([\d,\.]+)\s*€/);
+
+        // Extract status keywords
+        const statusKeywords = ["consegnato", "in preparazione", "in consegna", "annullato", "confermato", "completato"];
+        const status = statusKeywords.find(s => text.toLowerCase().includes(s)) ?? "unknown";
+
+        if (idMatch || dateMatch) {
+          results.push({
+            id: idMatch?.[1] ?? String(results.length + 1),
+            date: dateMatch?.[1] ?? "",
+            status,
+            total: totalMatch ? parseFloat(totalMatch[1].replace(",", ".")) : 0,
+          });
+        }
       });
 
       return results;
