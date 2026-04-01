@@ -143,13 +143,15 @@ Errors return `{ "ok": false, "error": "..." }` with exit code 1.
 | `spesa esselunga logout` | Clear saved session |
 | `spesa esselunga status` | Check if session is valid |
 | `spesa esselunga search QUERY` | Search products (`-n` for max results) |
+| `spesa esselunga buy QUERY` | Search + pick + add to cart in one step (`--pick cheapest/first/exact`, `-q` for qty) |
 | `spesa esselunga cart list` | Show cart contents |
 | `spesa esselunga cart add URL_OR_QUERY` | Add product to cart (`-q` for quantity) |
 | `spesa esselunga cart remove ID` | Remove product from cart |
+| `spesa esselunga checkout` | Show cart + delivery slots in one step |
 | `spesa esselunga slots` | Show delivery time slots |
 | `spesa esselunga orders` | List past orders (`-n` for limit) |
 
-All commands accept `--json` for structured output.
+All commands accept `--json` for structured output and `-y`/`--yes` for non-interactive mode.
 
 ## How It Works
 
@@ -217,12 +219,17 @@ The agent will invoke spesa when you say things like "order groceries", "add mil
 ### Agent workflow example
 
 ```bash
-# Agent checks session, searches, adds to cart, checks slots
-spesa esselunga status --json
-spesa esselunga search "mozzarella di bufala" --json --limit 5
-spesa esselunga cart add <url-from-search> --json
-spesa esselunga cart list --json
-spesa esselunga slots --json
+# OLD: 5 commands, 5 approval prompts
+# spesa esselunga status --json
+# spesa esselunga search "mozzarella di bufala" --json --limit 5
+# spesa esselunga cart add <url-from-search> --json
+# spesa esselunga cart list --json
+# spesa esselunga slots --json
+
+# NEW: 3 commands with compound operations
+spesa esselunga status --json --yes              # 1. check session
+spesa esselunga buy "mozzarella di bufala" --json --yes  # 2. search + pick + add
+spesa esselunga checkout --json --yes            # 3. cart + slots
 ```
 
 ---

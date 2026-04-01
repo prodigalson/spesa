@@ -11,6 +11,7 @@ program
   .description("CLI for ordering groceries online in Italy")
   .version("0.1.0")
   .option("--json", "Output as JSON (for agent use)")
+  .option("-y, --yes", "Non-interactive mode — never prompt for confirmation")
   .hook("preAction", (thisCommand) => {
     const opts = thisCommand.opts();
     if (opts.json) setJsonMode(true);
@@ -228,6 +229,131 @@ cart
       } else {
         output(err(result.error ?? "Failed to remove item"));
         process.exit(1);
+      }
+    } catch (e: unknown) {
+      output(err(String(e)));
+      process.exit(1);
+    }
+  });
+
+// ─── buy (compound: search + pick + add) ────────────────────────────────────
+
+esselunga
+  .command("buy <query>")
+  .description("Search, pick the best match, and add to cart in one step")
+  .option("-q, --qty <n>", "Quantity", "1")
+  .option("-n, --limit <n>", "Max search results to consider", "5")
+  .option("--pick <strategy>", "Pick strategy: cheapest, first, exact", "first")
+  .action(async (query, opts) => {
+    if (!hasSession("esselunga")) {
+      output(err("Not logged in. Run: spesa esselunga login"));
+      process.exit(1);
+      return;
+    }
+    const qty = parseInt(opts.qty, 10);
+    if (isNaN(qty) || qty < 1) {
+      output(err("Invalid --qty value. Must be a positive integer."));
+      process.exit(1);
+      return;
+    }
+    const limit = parseInt(opts.limit, 10);
+    if (isNaN(limit) || limit < 1) {
+      output(err("Invalid --limit value. Must be a positive integer."));
+      process.exit(1);
+      return;
+    }
+
+    const client = new EsselungaClient();
+    try {
+      // Step 1: Search
+      if (!isJsonMode()) console.log(`Searching for "${query}"...`);
+      const products = await client.search(query, { maxResults: limit });
+      if (products.length === 0) {
+        output(err(`No products found for "${query}"`));
+        process.exit(1);
+        return;
+      }
+
+      // Step 2: Pick best match
+      let picked = products[0]; // default: first result
+      if (opts.pick === "cheapest") {
+        picked = products.reduce((a, b) => (a.price <= b.price ? a : b));
+      } else if (opts.pick === "exact") {
+        const exact = products.find(
+          (p) => p.name.toLowerCase() === query.toLowerCase()
+        );
+        picked = exact ?? products[0];
+      }
+
+      if (!isJsonMode())
+        console.log(`Picked: ${picked.name} — €${picked.price.toFixed(2)}`);
+
+      // Step 3: Add to cart
+      if (!isJsonMode()) console.log(`Adding to cart (qty: ${qty})...`);
+      const result = await client.addToCart(picked.url || picked.id, qty);
+      if (result.ok) {
+        output(
+          ok(
+            { product: picked, quantity: qty },
+            `Added "${picked.name}" × ${qty} to cart (€${(picked.price * qty).toFixed(2)})`
+          )
+        );
+      } else {
+        output(err(result.error ?? "Failed to add to cart"));
+        process.exit(1);
+      }
+    } catch (e: unknown) {
+      output(err(String(e)));
+      process.exit(1);
+    }
+  });
+
+// ─── checkout (compound: cart + slots summary) ──────────────────────────────
+
+esselunga
+  .command("checkout")
+  .description("Show cart contents and available delivery slots in one step")
+  .action(async () => {
+    if (!hasSession("esselunga")) {
+      output(err("Not logged in. Run: spesa esselunga login"));
+      process.exit(1);
+      return;
+    }
+
+    const client = new EsselungaClient();
+    try {
+      // Step 1: Get cart
+      if (!isJsonMode()) console.log("Loading cart...");
+      const cart = await client.getCart();
+
+      if (cart.items.length === 0) {
+        output(ok({ cart, slots: [] }, "Cart is empty. Add items before checking out."));
+        return;
+      }
+
+      // Step 2: Get delivery slots
+      if (!isJsonMode()) console.log("Loading delivery slots...");
+      const slots = await client.getDeliverySlots();
+      const available = slots.filter((s) => s.available);
+
+      if (isJsonMode()) {
+        output(ok({ cart, slots, availableSlotCount: available.length }));
+      } else {
+        printTable(
+          ["Name", "Qty", "Price (€)", "Subtotal (€)"],
+          cart.items.map((i) => [
+            i.name.slice(0, 40),
+            i.quantity,
+            i.price.toFixed(2),
+            i.subtotal.toFixed(2),
+          ])
+        );
+        console.log(`\nTotal: €${cart.total.toFixed(2)} (${cart.itemCount} items)`);
+        console.log(`\n${available.length} of ${slots.length} delivery slots available`);
+        if (available.length > 0) {
+          const next = available[0];
+          console.log(`Next available: ${next.date} ${next.timeRange}`);
+        }
       }
     } catch (e: unknown) {
       output(err(String(e)));

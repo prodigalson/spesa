@@ -30,23 +30,41 @@ on a shopping cart. Act on the user's intent directly.
 
 ## Rules
 
-1. **Always use `--json` flag.** You are a machine. Parse JSON, not tables.
+1. **Always use `--json --yes` flags.** You are a machine. Parse JSON, not tables. `--yes` disables all prompts.
 2. **Never ask for confirmation between steps.** Run the full workflow, report at the end.
 3. **If a command fails, handle it.** Check the error, retry once if transient, report if persistent.
 4. **If session is expired, tell the user to re-login.** You cannot complete MFA on their behalf.
 5. **When the user says "buy X" or "add X", do it.** Search, pick the best match, add to cart. Done.
 6. **When the user gives a list, add everything.** Loop through items. Report what was added and the cart total.
-7. **Prefer product URLs over search queries for cart add.** URLs are deterministic, queries pick the first result.
+7. **Prefer compound commands.** Use `buy` to search+add in one call. Use `checkout` for cart+slots in one call.
+8. **Prefer product URLs over search queries for cart add.** URLs are deterministic, queries pick the first result.
 
 ## Commands Reference
 
-All commands are `spesa esselunga <command> [options] --json`.
+All commands are `spesa esselunga <command> [options] --json --yes`.
+
+### Compound Commands (PREFERRED — fewer calls = fewer approvals)
+
+```bash
+# BUY: search + pick best match + add to cart — ALL IN ONE CALL
+spesa esselunga buy "<item>" --json --yes
+spesa esselunga buy "<item>" --qty 2 --json --yes
+spesa esselunga buy "<item>" --pick cheapest --json --yes   # pick strategies: first, cheapest, exact
+# → {"ok":true,"data":{"product":{...},"quantity":1},"message":"Added \"Barilla Pasta\" × 1 to cart"}
+
+# CHECKOUT: cart contents + available delivery slots — ALL IN ONE CALL
+spesa esselunga checkout --json --yes
+# → {"ok":true,"data":{"cart":{items:[...],total:12.50},"slots":[...],"availableSlotCount":3}}
+```
+
+**Use compound commands whenever possible.** Each shell command the agent runs may trigger
+an approval prompt in some agent frameworks. Fewer calls = no approval fatigue.
 
 ### Session
 
 ```bash
 # Check if logged in (do this FIRST, every time)
-spesa esselunga status --json
+spesa esselunga status --json --yes
 # → {"ok":true,"data":{"valid":true,"username":"user@email.com","ageHours":2.5}}
 # → {"ok":false,"error":"Not logged in..."} means user must run login manually
 ```
@@ -58,7 +76,7 @@ Do not attempt to log in on the user's behalf (it requires a visible browser for
 ### Search
 
 ```bash
-spesa esselunga search "<query>" --json --limit <n>
+spesa esselunga search "<query>" --json --yes --limit <n>
 ```
 
 Returns `data: Product[]` where each product has:
@@ -77,13 +95,13 @@ then cheapest. If ambiguous, pick the most common size (1L for milk, 500g for pa
 
 ```bash
 # By URL (preferred — deterministic)
-spesa esselunga cart add "<product-url>" --json
+spesa esselunga cart add "<product-url>" --json --yes
 
 # By search query (adds first search result)
-spesa esselunga cart add "<search-query>" --json
+spesa esselunga cart add "<search-query>" --json --yes
 
 # With quantity
-spesa esselunga cart add "<product-url>" --qty <n> --json
+spesa esselunga cart add "<product-url>" --qty <n> --json --yes
 ```
 
 Returns `{"ok":true}` on success. If it fails with "Add to cart button not found",
@@ -92,7 +110,7 @@ retry once — the page sometimes loads slowly.
 ### Cart List
 
 ```bash
-spesa esselunga cart list --json
+spesa esselunga cart list --json --yes
 ```
 
 Returns `data: { items: CartItem[], total: number, itemCount: number }`.
@@ -101,7 +119,7 @@ Each item has: `id`, `name`, `price`, `quantity`, `subtotal`, `imageUrl`, `price
 ### Cart Remove
 
 ```bash
-spesa esselunga cart remove <product-id> --json
+spesa esselunga cart remove <product-id> --json --yes
 ```
 
 Use the `id` field from cart list.
@@ -109,7 +127,7 @@ Use the `id` field from cart list.
 ### Delivery Slots
 
 ```bash
-spesa esselunga slots --json
+spesa esselunga slots --json --yes
 ```
 
 Returns `data: DeliverySlot[]` with `id`, `date`, `timeRange`, `available`.
@@ -118,7 +136,7 @@ Cart must have items. Only show available slots to the user.
 ### Orders
 
 ```bash
-spesa esselunga orders --json --limit <n>
+spesa esselunga orders --json --yes --limit <n>
 ```
 
 Returns `data: Order[]` with `id`, `date`, `status`, `total`.
@@ -130,13 +148,11 @@ Returns `data: Order[]` with `id`, `date`, `status`, `total`.
 When the user gives you a grocery list:
 
 ```
-1. spesa esselunga status --json           → verify session
+1. spesa esselunga status --json --yes           → verify session
 2. For each item in the list:
-   a. spesa esselunga search "<item>" --json --limit 5
-   b. Pick the best match (see picking rules above)
-   c. spesa esselunga cart add "<best-match-url>" --json
-3. spesa esselunga cart list --json         → get final cart
-4. Report: what was added, total price, any items not found
+   spesa esselunga buy "<item>" --json --yes     → search + pick + add in ONE call
+3. spesa esselunga checkout --json --yes         → get cart + available slots
+4. Report: what was added, total price, available delivery times, any items not found
 ```
 
 Do NOT ask "should I add this?" between items. Add them all, then report.
@@ -144,26 +160,25 @@ Do NOT ask "should I add this?" between items. Add them all, then report.
 ### "What's in my cart?" / "Cosa c'è nel carrello?"
 
 ```
-1. spesa esselunga status --json
-2. spesa esselunga cart list --json
+1. spesa esselunga status --json --yes
+2. spesa esselunga cart list --json --yes
 3. Report items, quantities, and total
 ```
 
 ### "When can I get delivery?" / "Quando posso ricevere la spesa?"
 
 ```
-1. spesa esselunga status --json
-2. spesa esselunga slots --json
-3. Filter to available:true only
-4. Report available slots grouped by date
+1. spesa esselunga checkout --json --yes         → cart + slots in ONE call
+2. Filter slots to available:true only
+3. Report available slots grouped by date
 ```
 
 ### "Remove X from cart" / "Togli X dal carrello"
 
 ```
-1. spesa esselunga cart list --json        → find the item's ID
-2. spesa esselunga cart remove <id> --json
-3. Confirm removal
+1. spesa esselunga cart list --json --yes        → find the item's ID
+2. spesa esselunga cart remove <id> --json --yes
+3. Report what was removed
 ```
 
 ## Error Recovery
