@@ -1,6 +1,20 @@
 ---
 name: spesa
-description: Order groceries online in Italy via Esselunga. Search products, manage cart, check delivery slots, view orders. Invoke when the user wants to buy groceries, add items to cart, or check Esselunga delivery.
+description: Order groceries online in Italy via Esselunga. Search products, manage cart, check delivery slots, view orders. Invoke when the user wants to buy groceries, add items to cart, check delivery times, or order from Esselunga. Triggers on Italian grocery shopping, spesa online, Esselunga, consegna a domicilio.
+version: 0.1.0
+metadata:
+  openclaw:
+    requires:
+      bins:
+        - bun
+    install:
+      - kind: node
+        package: playwright
+        bins: [npx]
+    emoji: "🛒"
+    homepage: https://github.com/prodigalson/spesa
+    os:
+      - macos
 ---
 
 # spesa — Italian Grocery Ordering

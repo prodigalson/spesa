@@ -178,6 +178,55 @@ Occasionally the SPA takes longer than 8 seconds to load. Just retry the command
 **Login hangs or times out**
 Make sure you're on an Italian IP. Esselunga blocks international traffic entirely.
 
+## OpenClaw Skill
+
+spesa is also an [OpenClaw](https://clawhub.ai) agent skill. Any AI coding agent that supports OpenClaw can use it to order groceries on your behalf.
+
+### Install as a skill
+
+```bash
+# Via ClawHub CLI
+npx clawhub@latest install spesa
+
+# Or manually: copy into your skills directory
+git clone https://github.com/prodigalson/spesa.git ~/.openclaw/skills/spesa
+cd ~/.openclaw/skills/spesa && bun install && bunx playwright install webkit && bun run build
+```
+
+### For Claude Code
+
+```bash
+# Add to your project's skills
+cp -r /path/to/spesa .claude/skills/spesa
+```
+
+The `SKILL.md` frontmatter tells the agent when to activate:
+
+```yaml
+name: spesa
+description: Order groceries online in Italy via Esselunga...
+metadata:
+  openclaw:
+    requires:
+      bins: [bun]
+    emoji: "🛒"
+```
+
+The agent will invoke spesa when you say things like "order groceries", "add milk to my Esselunga cart", or "check delivery slots". All commands support `--json` for structured agent consumption.
+
+### Agent workflow example
+
+```bash
+# Agent checks session, searches, adds to cart, checks slots
+spesa esselunga status --json
+spesa esselunga search "mozzarella di bufala" --json --limit 5
+spesa esselunga cart add <url-from-search> --json
+spesa esselunga cart list --json
+spesa esselunga slots --json
+```
+
+---
+
 ## Development
 
 ```bash
