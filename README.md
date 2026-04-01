@@ -191,6 +191,76 @@ bun run typecheck
 bun run src/index.ts esselunga search "latte" --json
 ```
 
+---
+
+## In italiano
+
+### Cos'è spesa?
+
+**spesa** è uno strumento da riga di comando per fare la spesa online in Italia. Al momento supporta **Esselunga** (spesaonline.esselunga.it).
+
+Puoi cercare prodotti, gestire il carrello, controllare le fasce orarie di consegna e visualizzare gli ordini, tutto dal terminale. Funziona anche come strumento per agenti AI grazie alla modalità `--json`.
+
+### Requisiti
+
+- **macOS** (testato su Apple Silicon)
+- **[Bun](https://bun.sh)** v1.3+
+- **Un indirizzo IP italiano** (funziona anche con VPN)
+- **Un account Esselunga** con indirizzo di consegna già impostato
+
+### Installazione rapida
+
+```bash
+# 1. Clona il repository
+git clone https://github.com/prodigalson/spesa.git
+cd spesa
+
+# 2. Installa le dipendenze
+bun install
+
+# 3. Installa il browser WebKit (motore Safari)
+bunx playwright install webkit
+
+# 4. Compila il CLI
+bun run build
+
+# 5. Aggiungi al PATH (opzionale)
+export PATH="$PWD/dist:$PATH"
+```
+
+### Come si usa
+
+```bash
+# Accedi (si apre una finestra del browser per l'autenticazione)
+spesa esselunga login -u tua@email.com -p latuapassword
+
+# Cerca prodotti
+spesa esselunga search "pasta barilla"
+
+# Aggiungi al carrello
+spesa esselunga cart add "spaghetti barilla"
+
+# Visualizza il carrello
+spesa esselunga cart list
+
+# Controlla le fasce orarie di consegna
+spesa esselunga slots
+
+# Rimuovi dal carrello
+spesa esselunga cart remove <id-prodotto>
+
+# Visualizza ordini passati
+spesa esselunga orders
+```
+
+Tutti i comandi supportano `--json` per output strutturato.
+
+### Come funziona
+
+Esselunga non ha un'API pubblica. Questo CLI usa **Playwright** con **WebKit** (motore Safari) per automatizzare il sito web. WebKit è necessario perché il WAF di Esselunga blocca i browser basati su Chromium.
+
+---
+
 ## License
 
 MIT
