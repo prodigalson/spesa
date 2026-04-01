@@ -615,8 +615,9 @@ export class EsselungaClient {
     await this.launch(true);
     const page = await this.getPage();
 
-    await page.goto(`${BASE_URL}/commerce/nav/supermercato/store/carrello`, {
-      waitUntil: "domcontentloaded",
+    // The real cart/trolley page URL (discovered from navbar's "Carrello" link)
+    await page.goto(`${BASE_URL}/commerce/nav/supermercato/checkout/trolley`, {
+      waitUntil: "networkidle",
       timeout: NAV_TIMEOUT,
     });
     await page.waitForTimeout(SPA_BOOT_WAIT);
@@ -624,45 +625,63 @@ export class EsselungaClient {
     const cart = await page.evaluate((): Cart => {
       const items: CartItem[] = [];
 
-      // Cart items appear as list/option elements or distinct cart-item containers
-      const cards = document.querySelectorAll(
-        '[class*="cart-item"], [class*="CartItem"], [class*="lineItem"], [role="listitem"]'
-      );
+      // Trolley page uses AngularJS with ng-repeat="receiptItem in trolleyCtrl.receiptItems"
+      // Each item is a div.esselunga-checkout-trolley-container with a child
+      // div.esselunga-checkout-trolley-container-prod[id="trolley_{sku}_{n}"]
+      const cards = document.querySelectorAll("div.esselunga-checkout-trolley-container[ng-repeat]");
 
       cards.forEach((card) => {
-        const nameEl =
-          card.querySelector('[class*="name"], [class*="title"], h3, h4') ||
-          card.querySelector("a");
-        const priceEl = card.querySelector('[class*="price"], [class*="prezzo"]');
-        const qtyEl = card.querySelector(
-          'select[aria-label*="Quantit" i], input[type="number"], [class*="quantity"]'
-        );
-        const linkEl = card.querySelector("a");
-
-        const name = nameEl?.textContent?.trim() ?? "";
+        // Product name from the link
+        const nameLink = card.querySelector("a.esselunga-checkout-trolley-container-prod-desc-label");
+        const name = nameLink?.textContent?.trim() ?? "";
         if (!name) return;
 
-        const priceText = priceEl?.textContent?.trim() ?? "0";
-        const priceMatch = priceText.match(/[\d,\.]+/);
-        const price = priceMatch ? parseFloat(priceMatch[0].replace(",", ".")) : 0;
+        // SKU from the prod container's id: "trolley_{sku}_{n}"
+        const prodDiv = card.querySelector("div.esselunga-checkout-trolley-container-prod[id]");
+        const trolleyId = prodDiv?.id ?? "";
+        const idParts = trolleyId.split("_");
+        const sku = idParts.length >= 2 ? idParts[1] : trolleyId;
 
-        const qty =
-          parseInt(
-            (qtyEl as HTMLSelectElement)?.value ??
-              (qtyEl as HTMLInputElement)?.value ??
-              "1"
-          ) || 1;
+        // Unit price: look for "Prezzo Attuale X,XX€" in the unit price section
+        const unitPriceDiv = card.querySelector(".esselunga-checkout-trolley-container-prod-unitprice");
+        const unitText = unitPriceDiv?.textContent ?? "";
+        const currentPriceMatch = unitText.match(/Prezzo Attuale\s*([\d,]+)\s*€/i);
+        const fallbackPriceMatch = unitText.match(/([\d,]+)\s*€/);
+        const priceStr = currentPriceMatch?.[1] ?? fallbackPriceMatch?.[1] ?? "0";
+        const price = parseFloat(priceStr.replace(",", ".")) || 0;
 
-        const url = (linkEl as HTMLAnchorElement)?.href ?? "";
-        const id = url ? url.split("/").pop() ?? "" : Math.random().toString(36).slice(2);
+        // Total price for this line (quantity × unit price)
+        const totalPriceDiv = card.querySelector(".esselunga-checkout-trolley-container-totalprice");
+        const totalText = totalPriceDiv?.textContent ?? "";
+        const totalPriceMatch = totalText.match(/Prezzo Attuale\s*([\d,]+)\s*€/i);
+        const totalFallback = totalText.match(/([\d,]+)\s*€/);
+        const subtotal = parseFloat((totalPriceMatch?.[1] ?? totalFallback?.[1] ?? "0").replace(",", ".")) || 0;
+
+        // Quantity: derive from subtotal / price, or look for select value
+        const qtySelect = card.querySelector('select');
+        const qty = qtySelect
+          ? (parseInt((qtySelect as HTMLSelectElement).value) || 1)
+          : (price > 0 ? Math.round(subtotal / price) : 1);
+
+        // Price per unit (e.g. "1,58 € / kg")
+        const descDiv = card.querySelector(".esselunga-checkout-trolley-container-prod-desc");
+        const descText = descDiv?.textContent ?? "";
+        const perUnitMatch = descText.match(/([\d,]+)\s*€\s*\/\s*(\w+)/);
+        const pricePerUnit = perUnitMatch ? `${perUnitMatch[1]} €/${perUnitMatch[2]}` : undefined;
+
+        // Image
+        const img = card.querySelector("img");
+        const imageUrl = img?.getAttribute("src") ?? undefined;
 
         items.push({
-          id,
+          id: sku,
           name,
           price,
           quantity: qty,
-          subtotal: price * qty,
-          url,
+          subtotal: subtotal || price * qty,
+          url: `https://spesaonline.esselunga.it/commerce/nav/supermercato/store/prodotto/${sku}/`,
+          imageUrl,
+          pricePerUnit,
           available: true,
         });
       });
@@ -695,22 +714,29 @@ export class EsselungaClient {
     const page = await this.getPage();
 
     try {
-      await page.goto(`${BASE_URL}/commerce/nav/supermercato/store/carrello`, {
-        waitUntil: "domcontentloaded",
+      await page.goto(`${BASE_URL}/commerce/nav/supermercato/checkout/trolley`, {
+        waitUntil: "networkidle",
         timeout: NAV_TIMEOUT,
       });
       await page.waitForTimeout(SPA_BOOT_WAIT);
 
       const removed = await page.evaluate((id: string): boolean => {
-        const cards = document.querySelectorAll(
-          '[class*="cart-item"], [class*="CartItem"], [class*="lineItem"], [role="listitem"]'
-        );
+        // Trolley items: div.esselunga-checkout-trolley-container[ng-repeat]
+        // Each has a child div.esselunga-checkout-trolley-container-prod[id="trolley_{sku}_{n}"]
+        const cards = document.querySelectorAll("div.esselunga-checkout-trolley-container[ng-repeat]");
+
         for (const card of cards) {
-          const link = card.querySelector("a");
-          const text = card.textContent ?? "";
-          if (link?.href.includes(id) || text.includes(id)) {
+          const prodDiv = card.querySelector("div.esselunga-checkout-trolley-container-prod[id]");
+          const trolleyId = prodDiv?.id ?? "";
+          // Extract SKU from "trolley_{sku}_{n}"
+          const idParts = trolleyId.split("_");
+          const sku = idParts.length >= 2 ? idParts[1] : "";
+          const name = card.querySelector("a.esselunga-checkout-trolley-container-prod-desc-label")?.textContent?.trim() ?? "";
+
+          if (sku === id || trolleyId.includes(id) || name.toLowerCase().includes(id.toLowerCase())) {
+            // Delete button: aria-label="Elimina il prodotto dal carrello"
             const removeBtn = card.querySelector(
-              'button[aria-label*="rimuovi" i], button[aria-label*="remove" i], button[aria-label*="elimina" i], button[class*="remove"]'
+              'button[aria-label*="Elimina" i], button[ng-click*="deleteTrolleyItem"]'
             ) as HTMLButtonElement | null;
             if (removeBtn) {
               removeBtn.click();
@@ -746,9 +772,9 @@ export class EsselungaClient {
     await this.launch(true);
     const page = await this.getPage();
 
-    // Slots are shown during checkout flow, starting from the cart
-    await page.goto(`${BASE_URL}/commerce/nav/supermercato/store/carrello`, {
-      waitUntil: "domcontentloaded",
+    // Slots are shown during checkout flow, starting from the trolley
+    await page.goto(`${BASE_URL}/commerce/nav/supermercato/checkout/trolley`, {
+      waitUntil: "networkidle",
       timeout: NAV_TIMEOUT,
     });
     await page.waitForTimeout(SPA_BOOT_WAIT);
