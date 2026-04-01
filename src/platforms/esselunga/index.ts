@@ -1,5 +1,5 @@
 import {
-  chromium,
+  webkit,
   type Browser,
   type BrowserContext,
   type Page,
@@ -99,13 +99,16 @@ export class EsselungaClient {
   private page: Page | null = null;
 
   private async launch(headless = true): Promise<void> {
-    this.browser = await chromium.launch({
+    // Use WebKit (Safari engine) instead of Chromium.
+    // Esselunga's WAF aggressively blocks automated browsers and rate-limits IPs.
+    // WebKit with a real Safari user-agent is the least detectable option.
+    this.browser = await webkit.launch({
       headless,
-      args: ["--no-sandbox", "--disable-blink-features=AutomationControlled"],
     });
     this.context = await this.browser.newContext({
+      // Real Safari UA — matches what macOS Safari actually sends
       userAgent:
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
       locale: "it-IT",
       viewport: { width: 1280, height: 800 },
     });
@@ -144,6 +147,35 @@ export class EsselungaClient {
     return this.page;
   }
 
+  /** Human-like delay between actions to avoid WAF rate-limiting */
+  private async throttle(ms = 2000): Promise<void> {
+    // Add some jitter so requests don't look robotic
+    const jitter = Math.floor(Math.random() * 1000);
+    await new Promise((res) => setTimeout(res, ms + jitter));
+  }
+
+  /** Check if Esselunga is reachable before launching a full browser session */
+  static async checkConnectivity(): Promise<{ reachable: boolean; error?: string }> {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 10000);
+      const res = await fetch("https://spesaonline.esselunga.it", {
+        method: "HEAD",
+        signal: controller.signal,
+        redirect: "follow",
+      });
+      clearTimeout(timer);
+      return { reachable: res.ok || res.status < 500 };
+    } catch {
+      return {
+        reachable: false,
+        error:
+          "Cannot reach spesaonline.esselunga.it. Your IP may be temporarily blocked.\n" +
+          "Try: restart your router to get a new IP, or wait 30-60 minutes.",
+      };
+    }
+  }
+
   /** Wait for the Angular SPA to finish booting (loading spinner gone) */
   private async waitForSPA(page: Page): Promise<void> {
     // Wait for the search bar to appear — it's one of the last things to render
@@ -163,38 +195,34 @@ export class EsselungaClient {
     opts: { headless?: boolean } = {}
   ): Promise<{ ok: boolean; error?: string; mfaRequired?: boolean }> {
     try {
+      // Check connectivity before launching a browser
+      const conn = await EsselungaClient.checkConnectivity();
+      if (!conn.reachable) {
+        return { ok: false, error: conn.error ?? "Cannot reach Esselunga" };
+      }
+
       // Headed mode by default so user can handle MFA
       await this.launch(opts.headless ?? false);
       const page = await this.getPage();
 
-      // 1. Navigate to homepage — the SPA needs time to boot
-      await page.goto(HOME_URL, { waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT });
-      await this.waitForSPA(page);
+      // Go directly to the login page on account.esselunga.it
+      // This skips the slow Angular SPA homepage entirely.
+      // The daru param tells Esselunga where to redirect after login.
+      const loginUrl =
+        `https://${AUTH_DOMAIN}/area-utenti/applicationCheck` +
+        `?appName=spesaOnLine` +
+        `&daru=${encodeURIComponent(BASE_URL + ":443/commerce/login/spesaonline/store/home?")}` +
+        `&loginType=light`;
 
-      // 2. Click "Accedi" button — redirects to account.esselunga.it
-      try {
-        const loginBtn = await page.waitForSelector(SEL.loginButton, { timeout: 8000 });
-        await loginBtn.click();
-      } catch {
-        // Maybe already on login page or there's a different flow
-      }
+      // Don't wait for full page load — just start navigating, then wait for
+      // the form fields to appear. Esselunga's pages hang on domcontentloaded.
+      await page.goto(loginUrl, { waitUntil: "commit", timeout: 30000 });
 
-      // 3. Wait for the login form on account.esselunga.it
-      //    URL pattern: account.esselunga.it/area-utenti/applicationCheck?appName=spesaOnLine&...
-      try {
-        await page.waitForURL(/account\.esselunga\.it/, { timeout: 10000 });
-      } catch {
-        // Try navigating directly
-        await page.goto(
-          `https://${AUTH_DOMAIN}/area-utenti/applicationCheck?appName=spesaOnLine&daru=${encodeURIComponent(BASE_URL + ":443/commerce/login/spesaonline/store/home?")}&loginType=light`,
-          { waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT }
-        );
-      }
-
-      // 4. Fill the login form
+      // Fill the login form
       //    Real form has: textbox "E-mail", textbox "password", button "ACCEDI"
-      const emailField = await page.waitForSelector(SEL.loginEmail, { timeout: 8000 });
-      const passField = await page.waitForSelector(SEL.loginPassword, { timeout: 3000 });
+      //    Wait generously for the form to render (up to 30s)
+      const emailField = await page.waitForSelector(SEL.loginEmail, { timeout: 30000 });
+      const passField = await page.waitForSelector(SEL.loginPassword, { timeout: 5000 });
 
       await emailField.fill(username);
       await passField.fill(password);
@@ -215,10 +243,11 @@ export class EsselungaClient {
       await submitBtn.click();
 
       // 6. Wait for redirect back to spesaonline.esselunga.it or MFA
+      //    The store SPA is slow, so give it up to 60s for the redirect
       try {
-        await page.waitForURL(/spesaonline\.esselunga\.it/, { timeout: 15000 });
-        // Success — back on the store
-        await page.waitForTimeout(2000);
+        await page.waitForURL(/spesaonline\.esselunga\.it/, { timeout: 60000 });
+        // Success — back on the store. Don't wait for SPA to fully boot.
+        await page.waitForTimeout(3000);
         await this.persistSession(username);
         await this.close();
         return { ok: true };
@@ -366,7 +395,7 @@ export class EsselungaClient {
     // Navigate directly to the search results URL
     // Pattern discovered: /commerce/nav/supermercato/store/ricerca/{query}
     const searchUrl = `${BASE_URL}/commerce/nav/supermercato/store/ricerca/${encodeURIComponent(query)}`;
-    await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT });
+    await page.goto(searchUrl, { waitUntil: "commit", timeout: 30000 });
     await page.waitForTimeout(SPA_BOOT_WAIT);
 
     const products: Product[] = [];
@@ -554,11 +583,11 @@ export class EsselungaClient {
     try {
       // If it's a full URL, navigate to it. Otherwise search for the product.
       if (productUrlOrId.startsWith("http")) {
-        await page.goto(productUrlOrId, { waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT });
+        await page.goto(productUrlOrId, { waitUntil: "commit", timeout: 30000 });
       } else {
         // Navigate to search and find the product
         const searchUrl = `${BASE_URL}/commerce/nav/supermercato/store/ricerca/${encodeURIComponent(productUrlOrId)}`;
-        await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT });
+        await page.goto(searchUrl, { waitUntil: "commit", timeout: 30000 });
       }
 
       await page.waitForTimeout(SPA_BOOT_WAIT);
