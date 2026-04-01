@@ -55,12 +55,6 @@ const SEL = {
   productDetailLink: 'a[aria-label*="dettaglio" i], a[href*="product"]',
   productQtySelect: 'select[aria-label*="Quantit" i], [role="combobox"][aria-label*="Quantit" i]',
 
-  // Cart page
-  cartItemSelector: '[role="option"], [class*="cart-item"], [class*="lineItem"]',
-
-  // Delivery slots (from community reverse-engineering)
-  slotAvailable: '.disponibile, [class*="slot"][class*="available"]',
-  slotInput: 'input[name="quality"]',
 } as const;
 
 // ─── Cookie conversion ──────────────────────────────────────────────────────
@@ -147,13 +141,6 @@ export class EsselungaClient {
     return this.page;
   }
 
-  /** Human-like delay between actions to avoid WAF rate-limiting */
-  private async throttle(ms = 2000): Promise<void> {
-    // Add some jitter so requests don't look robotic
-    const jitter = Math.floor(Math.random() * 1000);
-    await new Promise((res) => setTimeout(res, ms + jitter));
-  }
-
   /** Check if Esselunga is reachable before launching a full browser session */
   static async checkConnectivity(): Promise<{ reachable: boolean; error?: string }> {
     try {
@@ -173,17 +160,6 @@ export class EsselungaClient {
           "Cannot reach spesaonline.esselunga.it. Your IP may be temporarily blocked.\n" +
           "Try: restart your router to get a new IP, or wait 30-60 minutes.",
       };
-    }
-  }
-
-  /** Wait for the Angular SPA to finish booting (loading spinner gone) */
-  private async waitForSPA(page: Page): Promise<void> {
-    // Wait for the search bar to appear — it's one of the last things to render
-    try {
-      await page.waitForSelector(SEL.searchInput, { timeout: SPA_BOOT_WAIT });
-    } catch {
-      // Fallback: just wait a fixed amount
-      await page.waitForTimeout(5000);
     }
   }
 
@@ -333,10 +309,16 @@ export class EsselungaClient {
 
     // Quick validation — load cookies and check if we get redirected to login
     try {
+      // Check connectivity before launching browser (same as login)
+      const conn = await EsselungaClient.checkConnectivity();
+      if (!conn.reachable) {
+        return { valid: false };
+      }
+
       await this.launch(true);
       const page = await this.getPage();
       await page.goto(HOME_URL, {
-        waitUntil: "domcontentloaded",
+        waitUntil: "commit",
         timeout: NAV_TIMEOUT,
       });
       await page.waitForTimeout(5000);
@@ -560,10 +542,10 @@ export class EsselungaClient {
     if (!session)
       throw new Error("Not logged in. Run: spesa esselunga login");
 
-    await this.launch(true);
-    const page = await this.getPage();
-
     try {
+      await this.launch(true);
+      const page = await this.getPage();
+
       // If it's a full URL, navigate to it. Otherwise search for the product.
       if (productUrlOrId.startsWith("http")) {
         await page.goto(productUrlOrId, { waitUntil: "commit", timeout: 30000 });
