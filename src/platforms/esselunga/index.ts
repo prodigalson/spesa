@@ -406,73 +406,56 @@ export class EsselungaClient {
       products.push(...extracted);
     }
 
-    // 2. Fall back to DOM scraping from ARIA tree
-    //    Product cards live in [role="listbox"] > [role="option"] with structured content
+    // 2. Scrape from the real DOM structure
+    //    Esselunga uses AngularJS: div.product[id] > a[aria-label] + img + price + button
     if (products.length === 0) {
-      const domProducts = await page.evaluate(
-        (selectors): Product[] => {
-          const results: Product[] = [];
-          const options = document.querySelectorAll(selectors.productOption);
+      const domProducts = await page.evaluate((): Product[] => {
+        const results: Product[] = [];
+        // Product cards are div.product with a numeric ID
+        const cards = document.querySelectorAll("div.product[id]");
 
-          options.forEach((option) => {
-            const label = option.getAttribute("aria-label") || option.textContent || "";
+        cards.forEach((card) => {
+          // Product name from the link's aria-label or img alt
+          const link = card.querySelector("a[aria-label]");
+          const img = card.querySelector("img[alt]");
+          const name = link?.getAttribute("aria-label") || img?.getAttribute("alt") || "";
+          if (!name) return;
 
-            // "Aggiungi al carrello" buttons contain the full product name
-            const addBtn = option.querySelector(
-              'button[aria-label*="Aggiungi al carrello"]'
-            ) as HTMLButtonElement | null;
+          // Product URL: /commerce/nav/supermercato/store/prodotto/{sku}/{slug}
+          const href = link?.getAttribute("href") ?? "";
+          const fullUrl = href.startsWith("http") ? href : `https://spesaonline.esselunga.it${href}`;
 
-            if (!addBtn) return;
+          // SKU from the URL path: .../prodotto/114052/barilla-pasta-...
+          const skuMatch = href.match(/\/prodotto\/(\d+)\//);
+          const sku = skuMatch?.[1] ?? card.id;
 
-            // Extract product name from the button's aria-label
-            // Pattern: "Aggiungi al carrello Barilla Pasta Spaghetti n.5 500 g"
-            const btnLabel = addBtn.getAttribute("aria-label") ?? "";
-            const name = btnLabel.replace(/^Aggiungi al carrello\s*/i, "").trim();
-            if (!name) return;
+          // Price: look for "Prezzo attuale X,XX€" in the card text
+          const cardText = card.textContent ?? "";
+          const currentPriceMatch = cardText.match(/Prezzo attuale\s*([\d,]+)\s*€/);
+          const fallbackPriceMatch = cardText.match(/([\d,]+)\s*€/);
+          const priceStr = currentPriceMatch?.[1] ?? fallbackPriceMatch?.[1] ?? "0";
+          const price = parseFloat(priceStr.replace(",", ".")) || 0;
 
-            // Get product detail link
-            const links = option.querySelectorAll("a");
-            let productUrl = "";
-            for (const link of links) {
-              if (link.href && link.href.includes("product")) {
-                productUrl = link.href;
-                break;
-              }
-              if (link.href && !productUrl) productUrl = link.href;
-            }
+          // Price per unit (e.g. "1,85 € / kg")
+          const perUnitMatch = cardText.match(/([\d,]+)\s*€\s*\/\s*(\w+)/);
+          const pricePerUnit = perUnitMatch ? `${perUnitMatch[1]} €/${perUnitMatch[2]}` : undefined;
 
-            // Extract price from text content
-            const text = option.textContent ?? "";
-            // Look for price pattern: €X.XX or X,XX €
-            const priceMatch = text.match(/€\s*([\d,.]+)|([\d,.]+)\s*€/);
-            let price = 0;
-            if (priceMatch) {
-              const priceStr = (priceMatch[1] || priceMatch[2] || "0").replace(",", ".");
-              price = parseFloat(priceStr) || 0;
-            }
+          // Image URL
+          const imageUrl = img?.getAttribute("src") ?? undefined;
 
-            const id = productUrl
-              ? productUrl.split("/").pop() ?? ""
-              : Math.random().toString(36).slice(2);
-
-            // Get image
-            const img = option.querySelector("img");
-            const imageUrl = img?.src;
-
-            results.push({
-              id,
-              name,
-              price,
-              url: productUrl || window.location.href,
-              imageUrl,
-              available: true,
-            });
+          results.push({
+            id: sku,
+            name,
+            price,
+            pricePerUnit,
+            url: fullUrl,
+            imageUrl,
+            available: true,
           });
+        });
 
-          return results;
-        },
-        { productOption: SEL.productOption }
-      );
+        return results;
+      });
       products.push(...domProducts);
     }
 
