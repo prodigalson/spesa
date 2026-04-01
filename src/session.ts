@@ -17,7 +17,7 @@ function sessionPath(platform: string): string {
 
 export function saveSession(session: Session): void {
   ensureDirs();
-  writeFileSync(sessionPath(session.platform), JSON.stringify(session, null, 2));
+  writeFileSync(sessionPath(session.platform), JSON.stringify(session, null, 2), { mode: 0o600 });
 }
 
 export function loadSession(platform: string): Session | null {

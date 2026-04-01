@@ -350,6 +350,7 @@ export class EsselungaClient {
     await this.launch(true);
     const page = await this.getPage();
 
+    try {
     // Intercept XHR/fetch responses that might contain product JSON
     const apiResponses: { url: string; data: unknown }[] = [];
     page.on("response", async (response) => {
@@ -460,6 +461,10 @@ export class EsselungaClient {
     await this.close();
     const maxResults = opts.maxResults ?? 20;
     return products.slice(0, maxResults);
+    } catch (e: unknown) {
+      await this.close();
+      throw e;
+    }
   }
 
   private extractProductsFromApiResponse(data: unknown): Product[] {
@@ -512,7 +517,7 @@ export class EsselungaClient {
           ? obj.prezzo
           : parseFloat(String(obj.price ?? obj.prezzo ?? 0).replace(",", ".")) || 0;
 
-    const id = String(obj.id ?? obj.sku ?? obj.codice ?? Math.random().toString(36).slice(2));
+    const id = String(obj.id ?? obj.sku ?? obj.codice ?? name.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 32));
     const url =
       (obj.url as string) ||
       (obj.link as string) ||
@@ -559,13 +564,17 @@ export class EsselungaClient {
 
       // Set quantity using the combobox/select if > 1
       if (quantity > 1) {
-        try {
-          const qtySelect = await page.$(SEL.productQtySelect);
-          if (qtySelect) {
+        const qtySelect = await page.$(SEL.productQtySelect);
+        if (qtySelect) {
+          try {
             await qtySelect.selectOption(String(quantity));
+          } catch {
+            await this.close();
+            return { ok: false, error: `Failed to set quantity to ${quantity}. The product may only support qty=1.` };
           }
-        } catch {
-          // Quantity setting failed — will add 1 and repeat
+        } else {
+          await this.close();
+          return { ok: false, error: `Quantity selector not found. Cannot set quantity to ${quantity}.` };
         }
       }
 
@@ -597,6 +606,7 @@ export class EsselungaClient {
     await this.launch(true);
     const page = await this.getPage();
 
+    try {
     // The real cart/trolley page URL (discovered from navbar's "Carrello" link)
     await page.goto(`${BASE_URL}/commerce/nav/supermercato/checkout/trolley`, {
       waitUntil: "networkidle",
@@ -685,6 +695,10 @@ export class EsselungaClient {
 
     await this.close();
     return cart;
+    } catch (e: unknown) {
+      await this.close();
+      throw e;
+    }
   }
 
   async removeFromCart(productId: string): Promise<{ ok: boolean; error?: string }> {
@@ -754,6 +768,7 @@ export class EsselungaClient {
     await this.launch(true);
     const page = await this.getPage();
 
+    try {
     // Slots are accessed from the trolley page by clicking "Data e ora" / "PRENOTA"
     // which triggers ng-click="$ctrl.onDeliveryClick()" and opens a slot picker dialog.
     // This requires items in the cart.
@@ -846,6 +861,10 @@ export class EsselungaClient {
 
     await this.close();
     return slots;
+    } catch (e: unknown) {
+      await this.close();
+      throw e;
+    }
   }
 
   // ─── Orders ─────────────────────────────────────────────────────────────────
@@ -858,6 +877,7 @@ export class EsselungaClient {
     await this.launch(true);
     const page = await this.getPage();
 
+    try {
     // Real orders URL: /ordini/precedenti ("I tuoi ordini")
     await page.goto(`${BASE_URL}/commerce/nav/supermercato/ordini/precedenti`, {
       waitUntil: "commit",
@@ -916,5 +936,9 @@ export class EsselungaClient {
 
     await this.close();
     return orders.slice(0, limit);
+    } catch (e: unknown) {
+      await this.close();
+      throw e;
+    }
   }
 }

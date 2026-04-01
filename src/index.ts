@@ -2,7 +2,7 @@
 import { Command } from "commander";
 import { setJsonMode, isJsonMode, output, ok, err, printTable } from "./output.ts";
 import { EsselungaClient } from "./platforms/esselunga/index.ts";
-import { hasSession, sessionAge } from "./session.ts";
+import { hasSession } from "./session.ts";
 
 const program = new Command();
 
@@ -27,14 +27,20 @@ esselunga
   .command("login")
   .description("Authenticate with Esselunga (opens browser for MFA if needed)")
   .requiredOption("-u, --username <email>", "Esselunga account email")
-  .requiredOption("-p, --password <password>", "Esselunga password")
+  .option("-p, --password <password>", "Esselunga password (or set SPESA_PASSWORD env var)")
   .option("--headless", "Run browser in headless mode (MFA won't work)")
   .action(async (opts) => {
+    const password = opts.password || process.env.SPESA_PASSWORD;
+    if (!password) {
+      output(err("Password required. Use -p flag or set SPESA_PASSWORD env var."));
+      process.exit(1);
+      return;
+    }
     const client = new EsselungaClient();
     if (!isJsonMode()) {
       console.log("Logging in to Esselunga...");
     }
-    const result = await client.login(opts.username, opts.password, {
+    const result = await client.login(opts.username, password, {
       headless: opts.headless ?? false,
     });
     if (result.ok) {
@@ -63,7 +69,6 @@ esselunga
       process.exit(1);
       return;
     }
-    const age = sessionAge("esselunga");
     if (!isJsonMode()) {
       console.log("Checking session...");
     }
@@ -73,7 +78,7 @@ esselunga
       const msg = `Logged in${status.username ? ` as ${status.username}` : ""} (session ${Math.round(status.ageHours ?? 0)}h old)`;
       output(ok(status, msg));
     } else {
-      output(err(`Session expired or invalid (${Math.round(age ?? 0)}h old). Re-login required.`));
+      output(err(`Session expired or invalid (${Math.round(status.ageHours ?? 0)}h old). Re-login required.`));
       process.exit(1);
     }
   });
@@ -95,7 +100,13 @@ esselunga
     }
     const client = new EsselungaClient();
     try {
-      const products = await client.search(query, { maxResults: parseInt(opts.limit) });
+      const limit = parseInt(opts.limit, 10);
+      if (isNaN(limit) || limit < 1) {
+        output(err("Invalid --limit value. Must be a positive integer."));
+        process.exit(1);
+        return;
+      }
+      const products = await client.search(query, { maxResults: limit });
       if (isJsonMode()) {
         output(ok(products));
       } else {
@@ -179,9 +190,15 @@ cart
     if (!isJsonMode()) console.log(`Adding to cart...`);
     const client = new EsselungaClient();
     try {
-      const result = await client.addToCart(urlOrId, parseInt(opts.qty));
+      const qty = parseInt(opts.qty, 10);
+      if (isNaN(qty) || qty < 1) {
+        output(err("Invalid --qty value. Must be a positive integer."));
+        process.exit(1);
+        return;
+      }
+      const result = await client.addToCart(urlOrId, qty);
       if (result.ok) {
-        output(ok(null, `Added to cart (qty: ${opts.qty})`));
+        output(ok(null, `Added to cart (qty: ${qty})`));
       } else {
         output(err(result.error ?? "Failed to add to cart"));
         process.exit(1);
@@ -268,7 +285,13 @@ esselunga
     if (!isJsonMode()) console.log("Loading orders...");
     const client = new EsselungaClient();
     try {
-      const orders = await client.getOrders(parseInt(opts.limit));
+      const limit = parseInt(opts.limit, 10);
+      if (isNaN(limit) || limit < 1) {
+        output(err("Invalid --limit value. Must be a positive integer."));
+        process.exit(1);
+        return;
+      }
+      const orders = await client.getOrders(limit);
       if (isJsonMode()) {
         output(ok(orders));
       } else {
