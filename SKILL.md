@@ -60,6 +60,15 @@ spesa esselunga checkout --json --yes
 **Use compound commands whenever possible.** Each shell command the agent runs may trigger
 an approval prompt in some agent frameworks. Fewer calls = no approval fatigue.
 
+### Doctor (run FIRST on a new machine)
+
+```bash
+spesa esselunga doctor --json --yes
+# → {"ok":true,"data":{"checks":[...],"allOk":true}}
+# If allOk is false, read each check's "detail" field for the exact fix command.
+# Run the fix, then run doctor again. Do NOT improvise.
+```
+
 ### Session
 
 ```bash
@@ -185,6 +194,8 @@ Do NOT ask "should I add this?" between items. Add them all, then report.
 
 | Error | Action |
 |-------|--------|
+| `Playwright WebKit is not installed` | Run: `bunx playwright install webkit`. Then retry. |
+| `Missing system libraries for Playwright WebKit` | Run: `sudo npx playwright install-deps webkit`. Do NOT manually apt-get individual libs. Then retry. |
 | `Not logged in` | Tell user to run login command. Stop. |
 | `Session expired` | Tell user to re-login. Stop. |
 | `Cannot reach spesaonline.esselunga.it` | Tell user: "Esselunga is unreachable. Check your VPN (needs Italian IP)." Stop. |
@@ -193,14 +204,31 @@ Do NOT ask "should I add this?" between items. Add them all, then report.
 | `No results` + delivery address error | Tell user to set delivery address via browser. |
 | Any other error | Report the error message to the user. Do not retry more than once. |
 
+**CRITICAL:** If you see a Playwright/WebKit error, run `spesa esselunga doctor --json --yes` first.
+Follow the fix instruction in the doctor output. Do NOT improvise or install packages manually.
+
 ## Setup (one-time, for skill installation)
 
 ```bash
 cd /path/to/spesa
 bun install
+
+# Install WebKit browser AND system dependencies (Linux needs both!)
 bunx playwright install webkit
+sudo npx playwright install-deps webkit   # installs libmanette, libenchant, etc.
+
 bun run build
 export PATH="$PWD/dist:$PATH"
+
+# Verify everything works
+spesa esselunga doctor --json --yes
 ```
+
+**IMPORTANT for Linux:** `bunx playwright install webkit` only downloads the browser binary.
+You MUST also run `sudo npx playwright install-deps webkit` to install system libraries.
+Do NOT try to `apt-get install` individual libraries manually — use `install-deps`.
+
+After setup, run `spesa esselunga doctor --json --yes` to verify all dependencies are working.
+If doctor reports a failure, follow the fix instruction in its output. Do NOT improvise fixes.
 
 Password can be passed via `-p` flag or `SPESA_PASSWORD` environment variable.

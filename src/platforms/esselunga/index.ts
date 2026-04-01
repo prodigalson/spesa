@@ -96,9 +96,36 @@ export class EsselungaClient {
     // Use WebKit (Safari engine) instead of Chromium.
     // Esselunga's WAF aggressively blocks automated browsers and rate-limits IPs.
     // WebKit with a real Safari user-agent is the least detectable option.
-    this.browser = await webkit.launch({
-      headless,
-    });
+    try {
+      this.browser = await webkit.launch({
+        headless,
+      });
+    } catch (e: unknown) {
+      const msg = String(e);
+      if (
+        msg.includes("Executable doesn't exist") ||
+        msg.includes("browserType.launch")
+      ) {
+        throw new Error(
+          "Playwright WebKit is not installed. Run: bunx playwright install webkit"
+        );
+      }
+      if (
+        msg.includes("libmanette") ||
+        msg.includes("libenchant") ||
+        msg.includes("libhyphen") ||
+        msg.includes("libsecret") ||
+        msg.includes("libwoff") ||
+        msg.includes("shared libraries") ||
+        msg.includes(".so")
+      ) {
+        throw new Error(
+          "Missing system libraries for Playwright WebKit. Run: sudo npx playwright install-deps webkit\n" +
+          "Do NOT attempt to install individual packages manually."
+        );
+      }
+      throw e;
+    }
     this.context = await this.browser.newContext({
       // Real Safari UA — matches what macOS Safari actually sends
       userAgent:

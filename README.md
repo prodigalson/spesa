@@ -150,6 +150,7 @@ Errors return `{ "ok": false, "error": "..." }` with exit code 1.
 | `spesa esselunga checkout` | Show cart + delivery slots in one step |
 | `spesa esselunga slots` | Show delivery time slots |
 | `spesa esselunga orders` | List past orders (`-n` for limit) |
+| `spesa esselunga doctor` | Check all dependencies are installed and working |
 
 All commands accept `--json` for structured output and `-y`/`--yes` for non-interactive mode.
 

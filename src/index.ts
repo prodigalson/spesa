@@ -436,4 +436,79 @@ esselunga
     }
   });
 
+// ─── doctor (setup check) ───────────────────────────────────────────────────
+
+esselunga
+  .command("doctor")
+  .description("Check that all dependencies are installed and working")
+  .action(async () => {
+    const checks: { name: string; ok: boolean; detail: string }[] = [];
+
+    // 1. Check bun
+    checks.push({ name: "bun", ok: true, detail: `${process.version}` });
+
+    // 2. Check playwright + webkit
+    try {
+      const { webkit } = await import("playwright");
+      const browser = await webkit.launch({ headless: true });
+      const version = browser.version();
+      await browser.close();
+      checks.push({ name: "playwright-webkit", ok: true, detail: `WebKit ${version}` });
+    } catch (e: unknown) {
+      const msg = String(e);
+      let detail = "Playwright WebKit launch failed";
+      let fix = "Run: bunx playwright install webkit";
+
+      if (msg.includes("Executable doesn't exist") || msg.includes("browserType.launch")) {
+        detail = "WebKit browser not installed";
+        fix = "Run: bunx playwright install webkit";
+      } else if (
+        msg.includes("libmanette") ||
+        msg.includes("libenchant") ||
+        msg.includes("libhyphen") ||
+        msg.includes("libsecret") ||
+        msg.includes("libwoff") ||
+        msg.includes("shared libraries") ||
+        msg.includes(".so")
+      ) {
+        detail = "Missing system libraries for WebKit";
+        fix = "Run: sudo npx playwright install-deps webkit";
+      }
+
+      checks.push({ name: "playwright-webkit", ok: false, detail: `${detail}. Fix: ${fix}` });
+    }
+
+    // 3. Check session
+    if (hasSession("esselunga")) {
+      checks.push({ name: "session", ok: true, detail: "Esselunga session found" });
+    } else {
+      checks.push({ name: "session", ok: false, detail: "No session. Run: spesa esselunga login -u EMAIL -p PASS" });
+    }
+
+    // 4. Check connectivity
+    try {
+      const conn = await EsselungaClient.checkConnectivity();
+      checks.push({
+        name: "connectivity",
+        ok: conn.reachable,
+        detail: conn.reachable ? "spesaonline.esselunga.it reachable" : (conn.error ?? "Unreachable"),
+      });
+    } catch {
+      checks.push({ name: "connectivity", ok: false, detail: "Network check failed" });
+    }
+
+    if (isJsonMode()) {
+      const allOk = checks.every((c) => c.ok);
+      output(ok({ checks, allOk }, allOk ? "All checks passed" : "Some checks failed"));
+      if (!allOk) process.exit(1);
+    } else {
+      for (const c of checks) {
+        console.log(`${c.ok ? "✓" : "✗"} ${c.name}: ${c.detail}`);
+      }
+      const allOk = checks.every((c) => c.ok);
+      console.log(allOk ? "\nAll good! Ready to use." : "\nSome checks failed. Fix the issues above.");
+      if (!allOk) process.exit(1);
+    }
+  });
+
 program.parse();
