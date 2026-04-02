@@ -274,6 +274,13 @@ export class EsselungaClient {
       await this.launch(opts.headless ?? false);
       const page = await this.getPage();
 
+      // Clear stale cookies from the browser context — expired session cookies
+      // can cause the auth page to redirect instead of showing the login form.
+      // This doesn't delete the session file (so checkSession still works).
+      if (this.context) {
+        await this.context.clearCookies();
+      }
+
       const loginUrl =
         `https://${AUTH_DOMAIN}/area-utenti/applicationCheck` +
         `?appName=spesaOnLine` +
@@ -281,6 +288,16 @@ export class EsselungaClient {
         `&loginType=light`;
 
       await page.goto(loginUrl, { waitUntil: "commit", timeout: 30000 });
+
+      // Dismiss Didomi cookie consent banner if present — it overlays the form
+      // and prevents Playwright from considering inputs "visible"
+      try {
+        const consentBtn = await page.waitForSelector('#didomi-notice-agree-button', { timeout: 10000 });
+        await consentBtn.click();
+        await page.waitForTimeout(1000);
+      } catch {
+        // No consent banner — continue
+      }
 
       const emailField = await page.waitForSelector(SEL.loginEmail, { timeout: 30000 });
       const passField = await page.waitForSelector(SEL.loginPassword, { timeout: 5000 });
@@ -303,8 +320,21 @@ export class EsselungaClient {
       await submitBtn.click();
 
       try {
-        await page.waitForURL(/spesaonline\.esselunga\.it/, { timeout: 60000 });
-        await page.waitForTimeout(3000);
+        // Wait for ACTUAL redirect to spesaonline — match on the page URL hostname,
+        // not just the string (the daru param in the account URL also contains it)
+        await page.waitForFunction(
+          () => window.location.hostname === "spesaonline.esselunga.it",
+          { timeout: 60000 }
+        );
+        // Wait for the SPA to fully bootstrap and establish the commerce session.
+        // The Angular app makes auth API calls after redirect that set up the
+        // server-side session — saving cookies too early misses these.
+        try {
+          await page.waitForLoadState("networkidle", { timeout: 30000 });
+        } catch {
+          // Fallback if networkidle times out (SPA may keep polling)
+          await page.waitForTimeout(10000);
+        }
         await this.persistSession(username);
         await this.close();
         return { ok: true };
@@ -313,27 +343,49 @@ export class EsselungaClient {
 
         if (currentUrl.includes(AUTH_DOMAIN)) {
           const pageText = await page.textContent("body");
+
+          // Check for reCAPTCHA challenge blocking login
+          const hasRecaptcha = await page.$('iframe[src*="recaptcha"]');
           const hasMFA =
             pageText?.includes("codice") ||
             pageText?.includes("OTP") ||
             pageText?.includes("verifica") ||
             pageText?.includes("conferma");
 
-          if (hasMFA && !opts.headless) {
-            console.error(
-              "\n🔐 MFA required. Complete the verification in the browser window..."
-            );
-            console.error("   Press Enter here once you've completed MFA.\n");
+          if ((hasMFA || hasRecaptcha) && !opts.headless) {
+            if (hasRecaptcha) {
+              console.error(
+                "\n🤖 reCAPTCHA challenge detected. It may resolve automatically..."
+              );
+              console.error("   If not, complete it in the browser window, then press Enter.\n");
+            } else {
+              console.error(
+                "\n🔐 MFA required. Complete the verification in the browser window..."
+              );
+              console.error("   Press Enter here once you've completed MFA.\n");
+            }
             await new Promise((res) => process.stdin.once("data", res));
 
             try {
-              await page.waitForURL(/spesaonline\.esselunga\.it/, { timeout: 30000 });
+              await page.waitForFunction(
+                () => window.location.hostname === "spesaonline.esselunga.it",
+                { timeout: 30000 }
+              );
             } catch {
               // user might still be on auth page — save anyway
             }
             await this.persistSession(username);
             await this.close();
             return { ok: true };
+          }
+
+          if (hasRecaptcha) {
+            await this.close();
+            return {
+              ok: false,
+              error:
+                "reCAPTCHA challenge blocked login. Run login without --headless (default) so the challenge can be solved in the browser.",
+            };
           }
 
           if (hasMFA) {
