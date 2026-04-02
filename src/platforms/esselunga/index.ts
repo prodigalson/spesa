@@ -222,9 +222,12 @@ export class EsselungaClient {
         const ngReady = !!(window as any).angular?.element?.(document.body)?.injector?.();
         // Check if a specific target element exists
         const targetReady = sel ? !!document.querySelector(sel) : true;
-        // Check for common SPA "loading" indicators being gone
-        const noLoader = !document.querySelector('.loading-overlay, .spinner, [class*="loading"]');
-        return (ngReady || targetReady) && noLoader;
+        // When a specific selector is requested, require it — Angular bootstraps
+        // before search results load, so ngReady alone is not sufficient.
+        if (sel) return targetReady;
+        // No specific selector: fall back to Angular readiness + no loader overlay
+        const noLoader = !document.querySelector('.loading-overlay, .spinner, .el-pre-loader-bg.el-show');
+        return ngReady && noLoader;
       }, targetSelector);
 
       if (ready) return;
