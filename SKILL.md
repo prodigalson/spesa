@@ -310,8 +310,14 @@ bun run mcp   # should start without errors (Ctrl+C to stop)
 
 ### Register the MCP server
 
-Add to your agent's MCP config:
+**OpenClaw:**
+```bash
+openclaw mcp set spesa '{"command":"bun","args":["run","/path/to/spesa/src/mcp.ts"]}'
+openclaw restart
+```
 
+**Claude Desktop / Claude Code:**
+Add to `claude_desktop_config.json` or `.claude/settings.json`:
 ```json
 {
   "mcpServers": {
@@ -322,6 +328,9 @@ Add to your agent's MCP config:
   }
 }
 ```
+
+**Other MCP-compatible agents:**
+Use `mcp.json` from the repo root, or register manually with your agent's MCP config.
 
 ### Login (user must do this manually)
 

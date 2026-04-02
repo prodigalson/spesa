@@ -188,56 +188,96 @@ Occasionally the SPA takes longer than 8 seconds to load. Just retry the command
 **Login hangs or times out**
 Make sure you're on an Italian IP. Esselunga blocks international traffic entirely.
 
-## OpenClaw Skill
+## MCP Server (for AI agents)
 
-spesa is also an [OpenClaw](https://clawhub.ai) agent skill. Any AI coding agent that supports OpenClaw can use it to order groceries on your behalf.
+spesa includes an MCP (Model Context Protocol) server so AI agents can call grocery
+operations as native tool calls — no shell exec, no approval prompts.
 
-### Install as a skill
+### Why MCP?
 
-```bash
-# Via ClawHub CLI
-npx clawhub@latest install spesa
+Agent frameworks (OpenClaw, Claude Code) gate every shell command with an approval prompt.
+The MCP server exposes all operations as native tools that bypass this gate entirely.
 
-# Or manually: copy into your skills directory
-git clone https://github.com/prodigalson/spesa.git ~/.openclaw/skills/spesa
-cd ~/.openclaw/skills/spesa && bun install && bunx playwright install webkit && bun run build
-```
-
-### For Claude Code
+### Setup
 
 ```bash
-# Add to your project's skills
-cp -r /path/to/spesa .claude/skills/spesa
+cd /path/to/spesa
+bun install
+bunx playwright install webkit
 ```
 
-The `SKILL.md` frontmatter tells the agent when to activate:
+### Register with OpenClaw
 
-```yaml
-name: spesa
-description: Order groceries online in Italy via Esselunga...
-metadata:
-  openclaw:
-    requires:
-      bins: [bun]
-    emoji: "🛒"
+```bash
+openclaw mcp set spesa '{"command":"bun","args":["run","/path/to/spesa/src/mcp.ts"]}'
+openclaw restart
 ```
 
-The agent will invoke spesa when you say things like "order groceries", "add milk to my Esselunga cart", or "check delivery slots". All commands support `--json` for structured agent consumption.
+### Register with Claude Desktop / Claude Code
+
+Add to your MCP config (`claude_desktop_config.json` or project settings):
+
+```json
+{
+  "mcpServers": {
+    "spesa": {
+      "command": "bun",
+      "args": ["run", "/absolute/path/to/spesa/src/mcp.ts"]
+    }
+  }
+}
+```
+
+### Available MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `check_session` | Check if Esselunga session is valid |
+| `search_products` | Search products by name/brand (returns matchScore) |
+| `add_to_cart` | Add single product to cart |
+| `add_many_to_cart` | Add multiple products in one call |
+| `get_cart` | Get cart contents |
+| `remove_from_cart` | Remove product from cart |
+| `update_cart_item` | Update quantity of cart item |
+| `clear_cart` | Remove all items from cart |
+| `get_delivery_slots` | Get delivery time slots |
+| `place_order` | Place order with a delivery slot |
+| `get_orders` | List past orders |
+| `reorder` | Re-add items from a previous order |
+| `doctor` | Health check |
 
 ### Agent workflow example
 
-```bash
-# OLD: 5 commands, 5 approval prompts
-# spesa esselunga status --json
-# spesa esselunga search "mozzarella di bufala" --json --limit 5
-# spesa esselunga cart add <url-from-search> --json
-# spesa esselunga cart list --json
-# spesa esselunga slots --json
+```
+1. check_session()                                              → verify login
+2. add_many_to_cart({items: [{query: "latte", qty: 2}, ...]})   → batch add
+3. get_delivery_slots()                                         → pick a slot
+4. place_order({slot_id: "0-09:00-10:00"})                      → order
+```
 
-# NEW: 3 commands with compound operations
-spesa esselunga status --json --yes              # 1. check session
-spesa esselunga buy "mozzarella di bufala" --json --yes  # 2. search + pick + add
-spesa esselunga checkout --json --yes            # 3. cart + slots
+No shell commands. No approval prompts.
+
+## OpenClaw Skill
+
+spesa is also an [OpenClaw](https://clawhub.ai) agent skill.
+
+```bash
+# Install the skill
+npx clawhub@latest install spesa
+
+# Register the MCP server (required for approval-free operation)
+openclaw mcp set spesa '{"command":"bun","args":["run","/path/to/spesa/src/mcp.ts"]}'
+openclaw restart
+```
+
+## CLI (for humans)
+
+The CLI is still available for manual use. All commands support `--json` and `-y/--yes`.
+
+```bash
+spesa esselunga search "mozzarella" --json --yes
+spesa esselunga buy "pasta barilla" --qty 2 --pick cheapest --json --yes
+spesa esselunga checkout --json --yes
 ```
 
 ---
