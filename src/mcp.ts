@@ -8,6 +8,7 @@ import {
 import { EsselungaClient } from "./platforms/esselunga/index.ts";
 import { hasSession } from "./session.ts";
 import type { ErrorCode } from "./types.ts";
+import { VERSION } from "./version.ts";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -256,7 +257,7 @@ const TOOLS = [
 // ─── Server ─────────────────────────────────────────────────────────────────
 
 const server = new Server(
-  { name: "spesa", version: "0.2.1" },
+  { name: "spesa", version: VERSION },
   { capabilities: { tools: {} } }
 );
 

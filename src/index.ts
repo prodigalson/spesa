@@ -3,13 +3,14 @@ import { Command } from "commander";
 import { setJsonMode, isJsonMode, setYesMode, isYesMode, output, ok, err, printTable } from "./output.ts";
 import { EsselungaClient } from "./platforms/esselunga/index.ts";
 import { hasSession } from "./session.ts";
+import { VERSION } from "./version.ts";
 
 const program = new Command();
 
 program
   .name("spesa")
   .description("CLI for ordering groceries online in Italy")
-  .version("0.2.1")
+  .version(VERSION)
   .option("--json", "Output as JSON (for agent use)")
   .option("-y, --yes", "Non-interactive mode — never prompt for confirmation")
   .hook("preAction", (thisCommand) => {

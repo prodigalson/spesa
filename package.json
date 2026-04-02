@@ -10,7 +10,8 @@
     "dev": "bun run src/index.ts",
     "build": "mkdir -p dist && printf '#!/usr/bin/env bash\\nDIR=\"$(cd \"$(dirname \"$0\")/..\" && pwd)\"\\nexec ~/.bun/bin/bun run \"$DIR/src/index.ts\" \"$@\"\\n' > dist/spesa && chmod +x dist/spesa",
     "typecheck": "tsc --noEmit",
-    "mcp": "bun run src/mcp.ts"
+    "mcp": "bun run src/mcp.ts",
+    "bump": "bun run scripts/bump.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
