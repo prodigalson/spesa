@@ -1,6 +1,6 @@
 {
   "name": "spesa",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "CLI for ordering groceries online in Italy (Esselunga, Everli)",
   "type": "module",
   "bin": {

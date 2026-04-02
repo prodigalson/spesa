@@ -9,7 +9,7 @@ const program = new Command();
 program
   .name("spesa")
   .description("CLI for ordering groceries online in Italy")
-  .version("0.2.0")
+  .version("0.2.1")
   .option("--json", "Output as JSON (for agent use)")
   .option("-y, --yes", "Non-interactive mode — never prompt for confirmation")
   .hook("preAction", (thisCommand) => {

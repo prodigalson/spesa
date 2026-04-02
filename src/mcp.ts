@@ -256,7 +256,7 @@ const TOOLS = [
 // ─── Server ─────────────────────────────────────────────────────────────────
 
 const server = new Server(
-  { name: "spesa", version: "0.2.0" },
+  { name: "spesa", version: "0.2.1" },
   { capabilities: { tools: {} } }
 );
 
