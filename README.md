@@ -133,7 +133,9 @@ spesa esselunga search "mozzarella" --json --limit 3
 }
 ```
 
-Errors return `{ "ok": false, "error": "..." }` with exit code 1.
+Errors return `{ "ok": false, "error": "...", "errorCode": "SESSION_EXPIRED" }` with exit code 1.
+
+Error codes: `LOGIN_REQUIRED`, `SESSION_EXPIRED`, `PRODUCT_NOT_FOUND`, `CART_EMPTY`, `SLOT_UNAVAILABLE`, `ADD_TO_CART_FAILED`, `ORDER_FAILED`, `NETWORK_ERROR`, `BROWSER_ERROR`, `MFA_REQUIRED`, `INVALID_INPUT`, `UNKNOWN`.
 
 ## All Commands
 
@@ -146,13 +148,18 @@ Errors return `{ "ok": false, "error": "..." }` with exit code 1.
 | `spesa esselunga buy QUERY` | Search + pick + add to cart in one step (`--pick cheapest/first/exact`, `-q` for qty) |
 | `spesa esselunga cart list` | Show cart contents |
 | `spesa esselunga cart add URL_OR_QUERY` | Add product to cart (`-q` for quantity) |
+| `spesa esselunga cart add-many --items JSON` | Add multiple products in one browser session |
+| `spesa esselunga cart update ID -q QTY` | Update quantity of a cart item |
 | `spesa esselunga cart remove ID` | Remove product from cart |
+| `spesa esselunga cart clear` | Remove all items from cart |
 | `spesa esselunga checkout` | Show cart + delivery slots in one step |
+| `spesa esselunga order --slot SLOT_ID` | Place an order with a delivery slot |
+| `spesa esselunga reorder` | Re-add items from most recent order |
 | `spesa esselunga slots` | Show delivery time slots |
 | `spesa esselunga orders` | List past orders (`-n` for limit) |
 | `spesa esselunga doctor` | Check all dependencies are installed and working |
 
-All commands accept `--json` for structured output and `-y`/`--yes` for non-interactive mode.
+All commands accept `--json` for structured output and `-y`/`--yes` for non-interactive mode (skips confirmation prompts).
 
 ## How It Works
 

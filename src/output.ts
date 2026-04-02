@@ -1,6 +1,7 @@
-import type { CliResult } from "./types.ts";
+import type { CliResult, ErrorCode } from "./types.ts";
 
 let jsonMode = false;
+let yesMode = false;
 
 export function setJsonMode(val: boolean) {
   jsonMode = val;
@@ -8,6 +9,14 @@ export function setJsonMode(val: boolean) {
 
 export function isJsonMode(): boolean {
   return jsonMode;
+}
+
+export function setYesMode(val: boolean) {
+  yesMode = val;
+}
+
+export function isYesMode(): boolean {
+  return yesMode;
 }
 
 export function output<T>(result: CliResult<T>): void {
@@ -26,8 +35,8 @@ export function ok<T>(data: T, message?: string): CliResult<T> {
   return { ok: true, data, message };
 }
 
-export function err(error: string): CliResult {
-  return { ok: false, error };
+export function err(error: string, errorCode?: ErrorCode): CliResult {
+  return { ok: false, error, errorCode };
 }
 
 export function printTable(

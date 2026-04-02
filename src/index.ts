@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { Command } from "commander";
-import { setJsonMode, isJsonMode, output, ok, err, printTable } from "./output.ts";
+import { setJsonMode, isJsonMode, setYesMode, isYesMode, output, ok, err, printTable } from "./output.ts";
 import { EsselungaClient } from "./platforms/esselunga/index.ts";
 import { hasSession } from "./session.ts";
 
@@ -9,13 +9,35 @@ const program = new Command();
 program
   .name("spesa")
   .description("CLI for ordering groceries online in Italy")
-  .version("0.1.0")
+  .version("0.2.0")
   .option("--json", "Output as JSON (for agent use)")
   .option("-y, --yes", "Non-interactive mode — never prompt for confirmation")
   .hook("preAction", (thisCommand) => {
     const opts = thisCommand.opts();
     if (opts.json) setJsonMode(true);
+    if (opts.yes) setYesMode(true);
   });
+
+// Helper: check session or exit
+function requireSession(): boolean {
+  if (!hasSession("esselunga")) {
+    output(err("Not logged in. Run: spesa esselunga login", "LOGIN_REQUIRED"));
+    process.exit(1);
+    return false;
+  }
+  return true;
+}
+
+// Helper: parse positive integer option
+function parsePositiveInt(val: string, name: string): number | null {
+  const n = parseInt(val, 10);
+  if (isNaN(n) || n < 1) {
+    output(err(`Invalid --${name} value. Must be a positive integer.`, "INVALID_INPUT"));
+    process.exit(1);
+    return null;
+  }
+  return n;
+}
 
 // ─── esselunga ───────────────────────────────────────────────────────────────
 
@@ -33,7 +55,7 @@ esselunga
   .action(async (opts) => {
     const password = opts.password || process.env.SPESA_PASSWORD;
     if (!password) {
-      output(err("Password required. Use -p flag or set SPESA_PASSWORD env var."));
+      output(err("Password required. Use -p flag or set SPESA_PASSWORD env var.", "INVALID_INPUT"));
       process.exit(1);
       return;
     }
@@ -47,7 +69,8 @@ esselunga
     if (result.ok) {
       output(ok(null, "Logged in successfully. Session saved."));
     } else {
-      output(err(result.error ?? "Login failed"));
+      const code = result.mfaRequired ? "MFA_REQUIRED" as const : "UNKNOWN" as const;
+      output(err(result.error ?? "Login failed", code));
       process.exit(1);
     }
   });
@@ -66,7 +89,7 @@ esselunga
   .description("Check Esselunga session status")
   .action(async () => {
     if (!hasSession("esselunga")) {
-      output(err("Not logged in. Run: spesa esselunga login"));
+      output(err("Not logged in. Run: spesa esselunga login", "LOGIN_REQUIRED"));
       process.exit(1);
       return;
     }
@@ -79,7 +102,7 @@ esselunga
       const msg = `Logged in${status.username ? ` as ${status.username}` : ""} (session ${Math.round(status.ageHours ?? 0)}h old)`;
       output(ok(status, msg));
     } else {
-      output(err(`Session expired or invalid (${Math.round(status.ageHours ?? 0)}h old). Re-login required.`));
+      output(err(`Session expired or invalid (${Math.round(status.ageHours ?? 0)}h old). Re-login required.`, "SESSION_EXPIRED"));
       process.exit(1);
     }
   });
@@ -91,22 +114,14 @@ esselunga
   .description("Search for products on Esselunga")
   .option("-n, --limit <n>", "Max results", "10")
   .action(async (query, opts) => {
-    if (!hasSession("esselunga")) {
-      output(err("Not logged in. Run: spesa esselunga login"));
-      process.exit(1);
-      return;
-    }
+    if (!requireSession()) return;
     if (!isJsonMode()) {
       console.log(`Searching for "${query}"...`);
     }
     const client = new EsselungaClient();
     try {
-      const limit = parseInt(opts.limit, 10);
-      if (isNaN(limit) || limit < 1) {
-        output(err("Invalid --limit value. Must be a positive integer."));
-        process.exit(1);
-        return;
-      }
+      const limit = parsePositiveInt(opts.limit, "limit");
+      if (!limit) return;
       const products = await client.search(query, { maxResults: limit });
       if (isJsonMode()) {
         output(ok(products));
@@ -116,12 +131,13 @@ esselunga
           return;
         }
         printTable(
-          ["ID", "Name", "Brand", "Price (€)", "Available"],
+          ["ID", "Name", "Brand", "Price (€)", "Match", "Available"],
           products.map((p) => [
             p.id.slice(0, 12),
             p.name.slice(0, 40),
             p.brand ?? "",
             p.price.toFixed(2),
+            p.matchScore !== undefined ? `${Math.round(p.matchScore * 100)}%` : "",
             p.available ? "✓" : "✗",
           ])
         );
@@ -129,7 +145,7 @@ esselunga
         console.log("Use product URLs with: spesa esselunga cart add <url>");
       }
     } catch (e: unknown) {
-      output(err(String(e)));
+      output(err(String(e), "UNKNOWN"));
       process.exit(1);
     }
   });
@@ -145,11 +161,7 @@ cart
   .alias("ls")
   .description("Show current cart contents")
   .action(async () => {
-    if (!hasSession("esselunga")) {
-      output(err("Not logged in. Run: spesa esselunga login"));
-      process.exit(1);
-      return;
-    }
+    if (!requireSession()) return;
     if (!isJsonMode()) console.log("Loading cart...");
     const client = new EsselungaClient();
     try {
@@ -173,7 +185,7 @@ cart
         console.log(`\nTotal: €${c.total.toFixed(2)} (${c.itemCount} items)`);
       }
     } catch (e: unknown) {
-      output(err(String(e)));
+      output(err(String(e), "UNKNOWN"));
       process.exit(1);
     }
   });
@@ -183,29 +195,61 @@ cart
   .description("Add a product to cart by URL or product ID")
   .option("-q, --qty <n>", "Quantity", "1")
   .action(async (urlOrId, opts) => {
-    if (!hasSession("esselunga")) {
-      output(err("Not logged in. Run: spesa esselunga login"));
-      process.exit(1);
-      return;
-    }
+    if (!requireSession()) return;
     if (!isJsonMode()) console.log(`Adding to cart...`);
     const client = new EsselungaClient();
     try {
-      const qty = parseInt(opts.qty, 10);
-      if (isNaN(qty) || qty < 1) {
-        output(err("Invalid --qty value. Must be a positive integer."));
-        process.exit(1);
-        return;
-      }
+      const qty = parsePositiveInt(opts.qty, "qty");
+      if (!qty) return;
       const result = await client.addToCart(urlOrId, qty);
       if (result.ok) {
         output(ok(null, `Added to cart (qty: ${qty})`));
       } else {
-        output(err(result.error ?? "Failed to add to cart"));
+        output(err(result.error ?? "Failed to add to cart", "ADD_TO_CART_FAILED"));
         process.exit(1);
       }
     } catch (e: unknown) {
-      output(err(String(e)));
+      output(err(String(e), "UNKNOWN"));
+      process.exit(1);
+    }
+  });
+
+cart
+  .command("add-many")
+  .description("Add multiple products to cart in one browser session")
+  .option("--items <json>", 'JSON array of {query, qty?, pick?} objects, e.g. \'[{"query":"latte","qty":2},{"query":"pane"}]\'')
+  .action(async (opts) => {
+    if (!requireSession()) return;
+    let items: { query: string; qty?: number; pick?: string }[];
+    try {
+      items = JSON.parse(opts.items);
+      if (!Array.isArray(items) || items.length === 0) {
+        output(err("--items must be a non-empty JSON array.", "INVALID_INPUT"));
+        process.exit(1);
+        return;
+      }
+    } catch {
+      output(err("Invalid JSON in --items. Expected: [{\"query\":\"latte\",\"qty\":2}]", "INVALID_INPUT"));
+      process.exit(1);
+      return;
+    }
+
+    if (!isJsonMode()) console.log(`Adding ${items.length} items to cart...`);
+    const client = new EsselungaClient();
+    try {
+      const results = await client.addManyToCart(items);
+      if (isJsonMode()) {
+        output(ok(results));
+      } else {
+        for (const r of results) {
+          const status = r.ok ? "✓" : "✗";
+          console.log(`${status} ${r.query}: ${r.ok ? `Added (qty: ${r.qty})` : r.error}`);
+        }
+        const succeeded = results.filter((r) => r.ok).length;
+        console.log(`\n${succeeded}/${results.length} items added.`);
+      }
+    } catch (e: unknown) {
+      output(err(String(e), "UNKNOWN"));
       process.exit(1);
     }
   });
@@ -215,11 +259,7 @@ cart
   .alias("rm")
   .description("Remove a product from cart by ID")
   .action(async (productId) => {
-    if (!hasSession("esselunga")) {
-      output(err("Not logged in. Run: spesa esselunga login"));
-      process.exit(1);
-      return;
-    }
+    if (!requireSession()) return;
     if (!isJsonMode()) console.log(`Removing ${productId} from cart...`);
     const client = new EsselungaClient();
     try {
@@ -227,11 +267,68 @@ cart
       if (result.ok) {
         output(ok(null, "Item removed from cart"));
       } else {
-        output(err(result.error ?? "Failed to remove item"));
+        output(err(result.error ?? "Failed to remove item", "PRODUCT_NOT_FOUND"));
         process.exit(1);
       }
     } catch (e: unknown) {
-      output(err(String(e)));
+      output(err(String(e), "UNKNOWN"));
+      process.exit(1);
+    }
+  });
+
+cart
+  .command("update <product-id>")
+  .description("Update quantity of a product in the cart")
+  .requiredOption("-q, --qty <n>", "New quantity")
+  .action(async (productId, opts) => {
+    if (!requireSession()) return;
+    const qty = parsePositiveInt(opts.qty, "qty");
+    if (!qty) return;
+    if (!isJsonMode()) console.log(`Updating ${productId} to qty ${qty}...`);
+    const client = new EsselungaClient();
+    try {
+      const result = await client.updateCartItem(productId, qty);
+      if (result.ok) {
+        output(ok(null, `Updated quantity to ${qty}`));
+      } else {
+        output(err(result.error ?? "Failed to update item", "PRODUCT_NOT_FOUND"));
+        process.exit(1);
+      }
+    } catch (e: unknown) {
+      output(err(String(e), "UNKNOWN"));
+      process.exit(1);
+    }
+  });
+
+cart
+  .command("clear")
+  .description("Remove all items from cart")
+  .action(async () => {
+    if (!requireSession()) return;
+    if (!isYesMode() && !isJsonMode()) {
+      console.log("This will remove all items from your cart.");
+      console.log("Use -y flag to skip this confirmation.");
+      const readline = await import("readline");
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      const answer = await new Promise<string>((res) => rl.question("Continue? [y/N] ", res));
+      rl.close();
+      if (answer.toLowerCase() !== "y") {
+        console.log("Cancelled.");
+        return;
+      }
+    }
+    if (!isJsonMode()) console.log("Clearing cart...");
+    const client = new EsselungaClient();
+    try {
+      const result = await client.clearCart();
+      if (result.ok) {
+        output(ok({ removedCount: result.removedCount }, `Cart cleared (${result.removedCount} items removed)`));
+      } else {
+        output(err(result.error ?? "Failed to clear cart", "UNKNOWN"));
+        process.exit(1);
+      }
+    } catch (e: unknown) {
+      output(err(String(e), "UNKNOWN"));
       process.exit(1);
     }
   });
@@ -245,23 +342,11 @@ esselunga
   .option("-n, --limit <n>", "Max search results to consider", "5")
   .option("--pick <strategy>", "Pick strategy: cheapest, first, exact", "first")
   .action(async (query, opts) => {
-    if (!hasSession("esselunga")) {
-      output(err("Not logged in. Run: spesa esselunga login"));
-      process.exit(1);
-      return;
-    }
-    const qty = parseInt(opts.qty, 10);
-    if (isNaN(qty) || qty < 1) {
-      output(err("Invalid --qty value. Must be a positive integer."));
-      process.exit(1);
-      return;
-    }
-    const limit = parseInt(opts.limit, 10);
-    if (isNaN(limit) || limit < 1) {
-      output(err("Invalid --limit value. Must be a positive integer."));
-      process.exit(1);
-      return;
-    }
+    if (!requireSession()) return;
+    const qty = parsePositiveInt(opts.qty, "qty");
+    if (!qty) return;
+    const limit = parsePositiveInt(opts.limit, "limit");
+    if (!limit) return;
 
     const client = new EsselungaClient();
     try {
@@ -269,7 +354,7 @@ esselunga
       if (!isJsonMode()) console.log(`Searching for "${query}"...`);
       const products = await client.search(query, { maxResults: limit });
       if (products.length === 0) {
-        output(err(`No products found for "${query}"`));
+        output(err(`No products found for "${query}"`, "PRODUCT_NOT_FOUND"));
         process.exit(1);
         return;
       }
@@ -299,11 +384,11 @@ esselunga
           )
         );
       } else {
-        output(err(result.error ?? "Failed to add to cart"));
+        output(err(result.error ?? "Failed to add to cart", "ADD_TO_CART_FAILED"));
         process.exit(1);
       }
     } catch (e: unknown) {
-      output(err(String(e)));
+      output(err(String(e), "UNKNOWN"));
       process.exit(1);
     }
   });
@@ -314,11 +399,7 @@ esselunga
   .command("checkout")
   .description("Show cart contents and available delivery slots in one step")
   .action(async () => {
-    if (!hasSession("esselunga")) {
-      output(err("Not logged in. Run: spesa esselunga login"));
-      process.exit(1);
-      return;
-    }
+    if (!requireSession()) return;
 
     const client = new EsselungaClient();
     try {
@@ -356,7 +437,88 @@ esselunga
         }
       }
     } catch (e: unknown) {
-      output(err(String(e)));
+      output(err(String(e), "UNKNOWN"));
+      process.exit(1);
+    }
+  });
+
+// ─── order (place order with selected slot) ─────────────────────────────────
+
+esselunga
+  .command("order")
+  .description("Place an order with a selected delivery slot")
+  .requiredOption("--slot <slot-id>", "Delivery slot ID (from slots command)")
+  .action(async (opts) => {
+    if (!requireSession()) return;
+
+    if (!isYesMode() && !isJsonMode()) {
+      console.log("You are about to place an order. This will charge your payment method.");
+      console.log("Use -y flag to skip this confirmation.");
+      const readline = await import("readline");
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      const answer = await new Promise<string>((res) => rl.question("Continue? [y/N] ", res));
+      rl.close();
+      if (answer.toLowerCase() !== "y") {
+        console.log("Order cancelled.");
+        return;
+      }
+    }
+
+    if (!isJsonMode()) console.log("Placing order...");
+    const client = new EsselungaClient();
+    try {
+      const result = await client.placeOrder(opts.slot);
+      if (result.ok) {
+        const data = result.data!;
+        if (isJsonMode()) {
+          output(ok(data));
+        } else {
+          console.log(`Order placed!`);
+          if (data.orderId) console.log(`Order ID: ${data.orderId}`);
+          console.log(`Delivery: ${data.slot.date} ${data.slot.timeRange}`);
+          console.log(`Total: €${data.total.toFixed(2)} (${data.itemCount} items)`);
+        }
+      } else {
+        output(err(result.error ?? "Failed to place order", result.errorCode ?? "ORDER_FAILED"));
+        process.exit(1);
+      }
+    } catch (e: unknown) {
+      output(err(String(e), "ORDER_FAILED"));
+      process.exit(1);
+    }
+  });
+
+// ─── reorder (repeat a previous order) ──────────────────────────────────────
+
+esselunga
+  .command("reorder")
+  .description("Re-add items from a previous order to your cart")
+  .option("--order-id <id>", "Order ID to reorder (default: most recent)")
+  .action(async (opts) => {
+    if (!requireSession()) return;
+
+    if (!isJsonMode()) console.log("Loading previous orders...");
+    const client = new EsselungaClient();
+    try {
+      const result = await client.reorder(opts.orderId);
+      if (result.ok) {
+        const data = result.data!;
+        if (isJsonMode()) {
+          output(ok(data));
+        } else {
+          console.log(`Reordering from order ${data.sourceOrderId}:`);
+          for (const item of data.results) {
+            const status = item.ok ? "✓" : "✗";
+            console.log(`  ${status} ${item.name}${!item.ok ? ` (${item.error})` : ""}`);
+          }
+          console.log(`\n${data.added}/${data.total} items added to cart.`);
+        }
+      } else {
+        output(err(result.error ?? "Failed to reorder", result.errorCode ?? "UNKNOWN"));
+        process.exit(1);
+      }
+    } catch (e: unknown) {
+      output(err(String(e), "UNKNOWN"));
       process.exit(1);
     }
   });
@@ -367,11 +529,7 @@ esselunga
   .command("slots")
   .description("Show available delivery slots")
   .action(async () => {
-    if (!hasSession("esselunga")) {
-      output(err("Not logged in. Run: spesa esselunga login"));
-      process.exit(1);
-      return;
-    }
+    if (!requireSession()) return;
     if (!isJsonMode()) console.log("Loading delivery slots...");
     const client = new EsselungaClient();
     try {
@@ -391,7 +549,7 @@ esselunga
         console.log(`\n${available.length} of ${slots.length} slots available`);
       }
     } catch (e: unknown) {
-      output(err(String(e)));
+      output(err(String(e), "UNKNOWN"));
       process.exit(1);
     }
   });
@@ -403,20 +561,12 @@ esselunga
   .description("List recent orders")
   .option("-n, --limit <n>", "Max orders to show", "10")
   .action(async (opts) => {
-    if (!hasSession("esselunga")) {
-      output(err("Not logged in. Run: spesa esselunga login"));
-      process.exit(1);
-      return;
-    }
+    if (!requireSession()) return;
     if (!isJsonMode()) console.log("Loading orders...");
     const client = new EsselungaClient();
     try {
-      const limit = parseInt(opts.limit, 10);
-      if (isNaN(limit) || limit < 1) {
-        output(err("Invalid --limit value. Must be a positive integer."));
-        process.exit(1);
-        return;
-      }
+      const limit = parsePositiveInt(opts.limit, "limit");
+      if (!limit) return;
       const orders = await client.getOrders(limit);
       if (isJsonMode()) {
         output(ok(orders));
@@ -431,7 +581,7 @@ esselunga
         );
       }
     } catch (e: unknown) {
-      output(err(String(e)));
+      output(err(String(e), "UNKNOWN"));
       process.exit(1);
     }
   });

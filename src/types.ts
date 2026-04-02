@@ -9,6 +9,14 @@ export interface Product {
   url: string;
   available: boolean;
   quantity?: number;
+  matchScore?: number;
+}
+
+export interface OrderConfirmation {
+  orderId?: string;
+  slot: DeliverySlot;
+  total: number;
+  itemCount: number;
 }
 
 export interface CartItem extends Product {
@@ -66,5 +74,21 @@ export interface CliResult<T = unknown> {
   ok: boolean;
   data?: T;
   error?: string;
+  errorCode?: ErrorCode;
   message?: string;
 }
+
+export type ErrorCode =
+  | "SESSION_EXPIRED"
+  | "LOGIN_REQUIRED"
+  | "PRODUCT_NOT_FOUND"
+  | "CART_EMPTY"
+  | "SLOT_UNAVAILABLE"
+  | "WAF_BLOCKED"
+  | "NETWORK_ERROR"
+  | "BROWSER_ERROR"
+  | "MFA_REQUIRED"
+  | "INVALID_INPUT"
+  | "ADD_TO_CART_FAILED"
+  | "ORDER_FAILED"
+  | "UNKNOWN";
