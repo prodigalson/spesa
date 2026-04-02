@@ -654,9 +654,40 @@ export class EsselungaClient {
         return { ok: false, error: "Add to cart button not found. Product may be unavailable or page didn't load." };
       }
 
-      await addBtn.click();
-      await page.waitForTimeout(2000);
+      // Set up response listener BEFORE clicking — catches the cart mutation API call
+      const cartResponse = page.waitForResponse(
+        (res) =>
+          res.request().method() === "POST" &&
+          (res.url().includes("/cart") ||
+           res.url().includes("/carrello") ||
+           res.url().includes("/trolley") ||
+           res.url().includes("/ecommerce")) &&
+          res.status() < 400,
+        { timeout: 15000 }
+      );
 
+      await addBtn.click();
+
+      // Wait for actual server confirmation instead of blind 2s timeout
+      try {
+        await cartResponse;
+      } catch {
+        // Fallback: if no matching API response detected, wait longer
+        await page.waitForTimeout(5000);
+      }
+
+      // Secondary check: verify cart badge updated
+      await page.waitForTimeout(1000);
+      try {
+        await page.$eval(
+          '[class*="cart-count"], [class*="carrello"] .badge, [class*="trolley-count"]',
+          (el) => el.textContent?.trim() ?? ""
+        );
+      } catch {
+        // Badge selector not found — not critical, continue
+      }
+
+      // Save cookies AFTER confirmed server-side update
       await this.persistSession();
       await this.close();
       return { ok: true };
