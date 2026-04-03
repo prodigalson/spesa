@@ -1,6 +1,7 @@
 import type { CliResult, ErrorCode } from "./types.ts";
 
 let jsonMode = false;
+let plainMode = false;
 let yesMode = false;
 
 export function setJsonMode(val: boolean) {
@@ -9,6 +10,14 @@ export function setJsonMode(val: boolean) {
 
 export function isJsonMode(): boolean {
   return jsonMode;
+}
+
+export function setPlainMode(val: boolean) {
+  plainMode = val;
+}
+
+export function isPlainMode(): boolean {
+  return plainMode;
 }
 
 export function setYesMode(val: boolean) {
@@ -44,6 +53,14 @@ export function printTable(
   rows: (string | number)[][]
 ): void {
   if (jsonMode) return;
+
+  if (plainMode) {
+    console.log(headers.join("\t"));
+    for (const row of rows) {
+      console.log(row.map((cell) => String(cell ?? "")).join("\t"));
+    }
+    return;
+  }
 
   const widths = headers.map((h, i) =>
     Math.max(h.length, ...rows.map((r) => String(r[i] ?? "").length))

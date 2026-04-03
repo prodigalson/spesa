@@ -5,7 +5,7 @@ import {
   type Page,
   type Cookie,
 } from "playwright";
-import { loadSession, saveSession, clearSession } from "../../session.ts";
+import { loadSession, saveSession, clearSession, saveCredentials, loadCredentials, clearCredentials } from "../../session.ts";
 import type {
   Product,
   Cart,
@@ -336,6 +336,8 @@ export class EsselungaClient {
           await page.waitForTimeout(10000);
         }
         await this.persistSession(username);
+        // Save credentials for auto session refresh
+        saveCredentials(PLATFORM, username, password);
         await this.close();
         return { ok: true };
       } catch {
@@ -375,6 +377,7 @@ export class EsselungaClient {
               // user might still be on auth page — save anyway
             }
             await this.persistSession(username);
+            saveCredentials(PLATFORM, username, password);
             await this.close();
             return { ok: true };
           }
@@ -418,6 +421,7 @@ export class EsselungaClient {
 
   async logout(): Promise<void> {
     clearSession(PLATFORM);
+    clearCredentials();
   }
 
   async checkSession(): Promise<{
@@ -461,6 +465,40 @@ export class EsselungaClient {
       await this.close();
       return { valid: false };
     }
+  }
+
+  // ─── Auto Session Refresh ───────────────────────────────────────────────────
+
+  /**
+   * Attempt to automatically refresh an expired session using stored credentials.
+   * Returns true if refresh succeeded, false otherwise.
+   * Only works in headless mode — MFA will cause failure.
+   */
+  async refreshSession(): Promise<boolean> {
+    const creds = loadCredentials(PLATFORM);
+    if (!creds) return false;
+
+    const result = await this.login(creds.username, creds.password, { headless: true });
+    return result.ok;
+  }
+
+  /**
+   * Ensure we have a valid session, attempting auto-refresh if expired.
+   * Returns { valid, refreshed } — refreshed=true if auto-refresh was used.
+   */
+  async ensureSession(): Promise<{ valid: boolean; refreshed: boolean }> {
+    const session = loadSession(PLATFORM);
+    if (!session) return { valid: false, refreshed: false };
+
+    const ageHours = (Date.now() - new Date(session.savedAt).getTime()) / 1000 / 60 / 60;
+
+    if (ageHours <= SESSION_TTL_HOURS) {
+      return { valid: true, refreshed: false };
+    }
+
+    // Session expired — try auto-refresh
+    const refreshed = await this.refreshSession();
+    return { valid: refreshed, refreshed };
   }
 
   // ─── Search ─────────────────────────────────────────────────────────────────

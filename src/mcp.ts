@@ -6,7 +6,11 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { EsselungaClient } from "./platforms/esselunga/index.ts";
-import { hasSession } from "./session.ts";
+import { hasSession, sessionAge } from "./session.ts";
+import {
+  getAllLists, getList, createList, deleteList,
+  addToList, removeFromList, ensureFavorites,
+} from "./lists.ts";
 import type { ErrorCode } from "./types.ts";
 import { VERSION } from "./version.ts";
 
@@ -30,7 +34,7 @@ function errorResult(message: string, errorCode?: ErrorCode) {
   };
 }
 
-function requireSession() {
+async function requireSession() {
   if (!hasSession("esselunga")) {
     return errorResult(
       "No valid Esselunga session. The user must log in manually by running:\n" +
@@ -38,6 +42,20 @@ function requireSession() {
         "Login requires a visible browser window for MFA and cannot be done via MCP.",
       "LOGIN_REQUIRED"
     );
+  }
+
+  // Auto-refresh expired sessions
+  const age = sessionAge("esselunga");
+  if (age !== null && age > 12) {
+    const client = new EsselungaClient();
+    const result = await client.ensureSession();
+    if (!result.valid) {
+      return errorResult(
+        "Session expired and auto-refresh failed. The user must re-login:\n" +
+          "  spesa esselunga login -u EMAIL -p PASSWORD",
+        "SESSION_EXPIRED"
+      );
+    }
   }
   return null;
 }
@@ -244,6 +262,168 @@ const TOOLS = [
     },
   },
 
+  // Lists
+  {
+    name: "get_lists",
+    description:
+      "Get all saved shopping lists. Lists are stored locally and can be bulk-ordered to cart.",
+    inputSchema: { type: "object" as const, properties: {}, required: [] },
+  },
+  {
+    name: "get_list",
+    description: "Get a specific shopping list by name, including all its items.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        name: {
+          type: "string",
+          description: "List name (e.g. 'weekly', 'party')",
+        },
+      },
+      required: ["name"],
+    },
+  },
+  {
+    name: "create_list",
+    description: "Create a new empty shopping list.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        name: {
+          type: "string",
+          description: "Name for the new list (e.g. 'weekly', 'party', 'basics')",
+        },
+      },
+      required: ["name"],
+    },
+  },
+  {
+    name: "delete_list",
+    description: "Delete a saved shopping list.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        name: {
+          type: "string",
+          description: "Name of the list to delete",
+        },
+      },
+      required: ["name"],
+    },
+  },
+  {
+    name: "add_to_list",
+    description:
+      "Add an item to a shopping list. If the item already exists, updates its quantity. " +
+      "Items are stored as search queries that get resolved when ordering.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        list_name: {
+          type: "string",
+          description: "Name of the list",
+        },
+        query: {
+          type: "string",
+          description: "Product search query (e.g. 'latte intero', 'pasta barilla')",
+        },
+        qty: {
+          type: "number",
+          description: "Quantity (default: 1)",
+        },
+        pick: {
+          type: "string",
+          enum: ["first", "cheapest", "exact"],
+          description: "Pick strategy when ordering (default: first)",
+        },
+      },
+      required: ["list_name", "query"],
+    },
+  },
+  {
+    name: "remove_from_list",
+    description: "Remove an item from a shopping list.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        list_name: {
+          type: "string",
+          description: "Name of the list",
+        },
+        query: {
+          type: "string",
+          description: "Product search query to remove",
+        },
+      },
+      required: ["list_name", "query"],
+    },
+  },
+  {
+    name: "order_list",
+    description:
+      "Add all items from a saved list to the Esselunga cart. " +
+      "Each item is searched and the best match is added based on its pick strategy.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        name: {
+          type: "string",
+          description: "Name of the list to order (or 'favorites' for favorites)",
+        },
+      },
+      required: ["name"],
+    },
+  },
+
+  // Favorites (convenience aliases)
+  {
+    name: "get_favorites",
+    description: "Get all items in the favorites list.",
+    inputSchema: { type: "object" as const, properties: {}, required: [] },
+  },
+  {
+    name: "add_favorite",
+    description: "Add a product to favorites.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        query: {
+          type: "string",
+          description: "Product search query (e.g. 'latte intero')",
+        },
+        qty: {
+          type: "number",
+          description: "Quantity (default: 1)",
+        },
+        pick: {
+          type: "string",
+          enum: ["first", "cheapest", "exact"],
+          description: "Pick strategy (default: first)",
+        },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "remove_favorite",
+    description: "Remove a product from favorites.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        query: {
+          type: "string",
+          description: "Product search query to remove",
+        },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "order_favorites",
+    description: "Add all favorites to the Esselunga cart.",
+    inputSchema: { type: "object" as const, properties: {}, required: [] },
+  },
+
   // Health
   {
     name: "doctor",
@@ -308,7 +488,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       // ── Search ───────────────────────────────────────────────────────
       case "search_products": {
-        const sessionErr = requireSession();
+        const sessionErr = await requireSession();
         if (sessionErr) return sessionErr;
         const client = new EsselungaClient();
         const products = await client.search(
@@ -320,7 +500,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       // ── Cart ─────────────────────────────────────────────────────────
       case "get_cart": {
-        const sessionErr = requireSession();
+        const sessionErr = await requireSession();
         if (sessionErr) return sessionErr;
         const client = new EsselungaClient();
         const cart = await client.getCart();
@@ -328,7 +508,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "add_to_cart": {
-        const sessionErr = requireSession();
+        const sessionErr = await requireSession();
         if (sessionErr) return sessionErr;
         const client = new EsselungaClient();
         const result = await client.addToCart(
@@ -342,7 +522,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "add_many_to_cart": {
-        const sessionErr = requireSession();
+        const sessionErr = await requireSession();
         if (sessionErr) return sessionErr;
         const items = args.items as { query: string; qty?: number; pick?: string }[];
         if (!Array.isArray(items) || items.length === 0) {
@@ -354,7 +534,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "remove_from_cart": {
-        const sessionErr = requireSession();
+        const sessionErr = await requireSession();
         if (sessionErr) return sessionErr;
         const client = new EsselungaClient();
         const result = await client.removeFromCart(args.product_id as string);
@@ -365,7 +545,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "update_cart_item": {
-        const sessionErr = requireSession();
+        const sessionErr = await requireSession();
         if (sessionErr) return sessionErr;
         const client = new EsselungaClient();
         const result = await client.updateCartItem(
@@ -379,7 +559,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "clear_cart": {
-        const sessionErr = requireSession();
+        const sessionErr = await requireSession();
         if (sessionErr) return sessionErr;
         const client = new EsselungaClient();
         const result = await client.clearCart();
@@ -395,7 +575,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       // ── Orders ───────────────────────────────────────────────────────
       case "get_delivery_slots": {
-        const sessionErr = requireSession();
+        const sessionErr = await requireSession();
         if (sessionErr) return sessionErr;
         const client = new EsselungaClient();
         const slots = await client.getDeliverySlots();
@@ -403,7 +583,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "place_order": {
-        const sessionErr = requireSession();
+        const sessionErr = await requireSession();
         if (sessionErr) return sessionErr;
         const client = new EsselungaClient();
         const result = await client.placeOrder(args.slot_id as string);
@@ -417,7 +597,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "get_orders": {
-        const sessionErr = requireSession();
+        const sessionErr = await requireSession();
         if (sessionErr) return sessionErr;
         const client = new EsselungaClient();
         const orders = await client.getOrders((args.limit as number) ?? 10);
@@ -425,7 +605,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "reorder": {
-        const sessionErr = requireSession();
+        const sessionErr = await requireSession();
         if (sessionErr) return sessionErr;
         const client = new EsselungaClient();
         const result = await client.reorder(args.order_id as string | undefined);
@@ -436,6 +616,123 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           );
         }
         return jsonResult(result.data);
+      }
+
+      // ── Lists ────────────────────────────────────────────────────────
+      case "get_lists": {
+        return jsonResult(getAllLists());
+      }
+
+      case "get_list": {
+        const list = getList(args.name as string);
+        if (!list) return errorResult(`List "${args.name}" not found`, "INVALID_INPUT");
+        return jsonResult(list);
+      }
+
+      case "create_list": {
+        try {
+          const list = createList(args.name as string);
+          return jsonResult({ ok: true, list, message: `List "${args.name}" created.` });
+        } catch (e: unknown) {
+          return errorResult(e instanceof Error ? e.message : String(e), "INVALID_INPUT");
+        }
+      }
+
+      case "delete_list": {
+        try {
+          deleteList(args.name as string);
+          return jsonResult({ ok: true, message: `List "${args.name}" deleted.` });
+        } catch (e: unknown) {
+          return errorResult(e instanceof Error ? e.message : String(e), "INVALID_INPUT");
+        }
+      }
+
+      case "add_to_list": {
+        try {
+          const item = addToList(
+            args.list_name as string,
+            args.query as string,
+            (args.qty as number) ?? 1,
+            args.pick as "first" | "cheapest" | "exact" | undefined
+          );
+          return jsonResult({ ok: true, item, message: `Added "${args.query}" to list "${args.list_name}"` });
+        } catch (e: unknown) {
+          return errorResult(e instanceof Error ? e.message : String(e), "INVALID_INPUT");
+        }
+      }
+
+      case "remove_from_list": {
+        try {
+          removeFromList(args.list_name as string, args.query as string);
+          return jsonResult({ ok: true, message: `Removed "${args.query}" from list "${args.list_name}"` });
+        } catch (e: unknown) {
+          return errorResult(e instanceof Error ? e.message : String(e), "INVALID_INPUT");
+        }
+      }
+
+      case "order_list": {
+        const sessionErr = await requireSession();
+        if (sessionErr) return sessionErr;
+        const list = getList(args.name as string);
+        if (!list) return errorResult(`List "${args.name}" not found`, "INVALID_INPUT");
+        if (list.items.length === 0) return errorResult(`List "${args.name}" is empty`, "INVALID_INPUT");
+        const items = list.items.map((i) => ({
+          query: i.query,
+          qty: i.qty,
+          pick: i.pick ?? "first",
+        }));
+        const client = new EsselungaClient();
+        const results = await client.addManyToCart(items);
+        return jsonResult({ list: args.name, results });
+      }
+
+      // ── Favorites ────────────────────────────────────────────────────
+      case "get_favorites": {
+        ensureFavorites();
+        return jsonResult(getList("favorites"));
+      }
+
+      case "add_favorite": {
+        ensureFavorites();
+        try {
+          const item = addToList(
+            "favorites",
+            args.query as string,
+            (args.qty as number) ?? 1,
+            args.pick as "first" | "cheapest" | "exact" | undefined
+          );
+          return jsonResult({ ok: true, item, message: `Added "${args.query}" to favorites` });
+        } catch (e: unknown) {
+          return errorResult(e instanceof Error ? e.message : String(e), "INVALID_INPUT");
+        }
+      }
+
+      case "remove_favorite": {
+        ensureFavorites();
+        try {
+          removeFromList("favorites", args.query as string);
+          return jsonResult({ ok: true, message: `Removed "${args.query}" from favorites` });
+        } catch (e: unknown) {
+          return errorResult(e instanceof Error ? e.message : String(e), "INVALID_INPUT");
+        }
+      }
+
+      case "order_favorites": {
+        const sessionErr = await requireSession();
+        if (sessionErr) return sessionErr;
+        ensureFavorites();
+        const favList = getList("favorites");
+        if (!favList || favList.items.length === 0) {
+          return errorResult("No favorites to order", "INVALID_INPUT");
+        }
+        const items = favList.items.map((i) => ({
+          query: i.query,
+          qty: i.qty,
+          pick: i.pick ?? "first",
+        }));
+        const client = new EsselungaClient();
+        const results = await client.addManyToCart(items);
+        return jsonResult({ list: "favorites", results });
       }
 
       // ── Health ───────────────────────────────────────────────────────
